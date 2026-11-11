@@ -1,7 +1,7 @@
 /** Build standalone GitHub mirrors from the canonical, scanned workspace. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { releaseFiles, root, checkPublicContents } from './release-files.mjs';
@@ -96,6 +96,11 @@ export function buildStandalone(plugin) {
   return { ...receipt, repositoryDirectory: path.relative(root, destination).split(path.sep).join('/') };
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+function isEntryPoint() {
+  try { return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntryPoint()) {
   for (const plugin of standalonePlugins) console.log(JSON.stringify(buildStandalone(plugin)));
 }

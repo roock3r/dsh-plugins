@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import YAML from './vendor/yaml/dist/index.js';
 import {
@@ -21,7 +21,8 @@ const fixtureHost = { id: 'lab', label: 'Test model host', url: 'http://192.168.
   provider: 'windows-lab', credentialRef: 'DSH_SWITCH_LAB_KEY', gatewayId: '11111111-1111-4111-8111-111111111111' };
 
 function fixture(run) {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-suite-installer-test-'));
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const temporary = fs.realpathSync(fs.mkdtempSync(path.join(tempRoot, 'dsh-suite-installer-test-')));
   const home = path.join(temporary, '.dsh'); fs.mkdirSync(home);
   const profiles = ['desktop', 'web', 'headless'].map(name => {
     const filename = path.join(home, 'profiles', name, 'cordis.patch.yml');
@@ -36,7 +37,8 @@ function fixture(run) {
   try { return run({ temporary, home, profiles, sourceRoot, fakeArchive }); }
   finally {
     const resolved = path.resolve(temporary);
-    assert.ok(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith('dsh-suite-installer-test-'));
+    assert.equal(path.dirname(resolved), tempRoot);
+    assert.ok(path.basename(resolved).startsWith('dsh-suite-installer-test-'));
     fs.rmSync(resolved, { recursive: true });
   }
 }
@@ -157,8 +159,35 @@ for (const id of ['dsh-delete-chat', 'dsh-model-switcher']) {
     assert.match(output, /standalone verified/);
     const help = execFileSync(process.execPath, [path.join(sourceRoot, 'install.mjs'), '--help'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
     assert.match(help, new RegExp(`Default: ${selectedName}`));
+    const alias = path.join(temporary, 'standalone-alias');
+    fs.symlinkSync(sourceRoot, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const linkedHelp = execFileSync(process.execPath, [path.join(alias, 'install.mjs'), '--help'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    assert.equal(linkedHelp, help, 'a symlinked download directory must execute the installer entrypoint');
+    if (id === 'dsh-delete-chat') {
+      const result = spawnSync(process.execPath, [path.join(alias, 'self-test.mjs')], {
+        env: { ...process.env, DSH_DELETE_TEST_PACKAGE_ROOT: '' }, encoding: 'utf8', timeout: 15000, windowsHide: true,
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Archive preflight failed: Set DSH_DELETE_TEST_PACKAGE_ROOT/);
+    }
   }));
 }
+
+test('standalone exporter invoked through a directory alias executes its source checks', () => fixture(({ temporary }) => {
+  const directory = path.join(temporary, 'exporter'), scripts = path.join(directory, 'scripts');
+  fs.mkdirSync(scripts, { recursive: true });
+  for (const filename of ['standalone.mjs', 'release-files.mjs', 'zip.mjs']) {
+    fs.copyFileSync(path.join(import.meta.dirname, 'scripts', filename), path.join(scripts, filename));
+  }
+  const alias = path.join(temporary, 'exporter-alias');
+  fs.symlinkSync(directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const result = spawnSync(process.execPath, [path.join(alias, 'scripts', 'standalone.mjs')], {
+    encoding: 'utf8', timeout: 15000, windowsHide: true,
+  });
+  assert.equal(result.status, 1, 'missing release inputs must be reported rather than silently skipping main');
+  assert.match(result.stderr, /ENOENT/);
+  assert.equal(fs.existsSync(path.join(directory, 'dist')), false);
+}));
 
 test('archive registration preserves providers, defaults, comments and executable YAML tags', () => fixture(({ home }) => {
   const pluginPath = path.join(home, 'plugins/dsh-delete-chat'), packageRoot = path.join(home, 'fixture-packages');

@@ -4,7 +4,7 @@ The approved destination is the **public** repository
 [`roock3r/dsh-plugins`](https://github.com/roock3r/dsh-plugins), with the plugin code
 under the [MIT License](../LICENSE), copyright 2026 Cristian Silva.
 
-The prepared suite release is **`v0.1.0-alpha.1`**, an experimental prerelease.
+The prepared suite release is **`v0.1.0-alpha.2`**, an experimental prerelease.
 The repository contains `dsh-delete-chat` and `dsh-model-switcher` plus their
 combined Mac installer. Existing plugin package versions remain `1.0.0` and
 `2.1.0`; the suite version identifies this initial public distribution.

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
@@ -649,6 +649,11 @@ async function main() {
   console.log(`Private rollback backup: ${backup}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isEntryPoint() {
+  try { return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntryPoint()) {
   main().catch(error => { console.error(`Installation stopped: ${error.message}`); process.exitCode = 1; });
 }

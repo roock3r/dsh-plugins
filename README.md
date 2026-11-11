@@ -4,7 +4,7 @@ A model-host pill and archived-chat deletion for DeepSeek Harness, with a combin
 macOS installer. A community extension, not an official DeepSeek product.
 Both packages are experimental and support the audited Harness builds listed below.
 
-Experimental suite release: **`v0.1.0-alpha.1`**.
+Experimental suite release: **`v0.1.0-alpha.2`**.
 Source: [`roock3r/dsh-plugins`](https://github.com/roock3r/dsh-plugins).
 See [GitHub releases](https://github.com/roock3r/dsh-plugins/releases) for downloads.
 

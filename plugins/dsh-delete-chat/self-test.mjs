@@ -1,11 +1,12 @@
 /** Native install preflight: synthetic chat storage only; never load a user profile. */
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDeletionService } from './service.mjs';
 import { buildAdapter } from './storage-adapter.mjs';
 
@@ -150,7 +151,12 @@ export async function runNativeSelfTest(packageRoot) {
   return { ok: true, checks, platform: process.platform };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+function isEntryPoint() {
+  try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntryPoint()) {
   try { console.log(JSON.stringify(await runNativeSelfTest(process.env.DSH_DELETE_TEST_PACKAGE_ROOT))); }
   catch (error) { console.error(`Archive preflight failed: ${error.message}`); process.exitCode = 1; }
 }
