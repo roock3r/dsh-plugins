@@ -9,9 +9,10 @@
   "type": "module",
   "workspaces": ["plugins/dsh-model-switcher", "plugins/dsh-delete-chat"],
   "scripts": {
-    "test": "node --test portable.test.mjs suite-installer.test.mjs plugins/dsh-delete-chat/test/*.test.mjs",
+    "test": "node --test portable.test.mjs suite-installer.test.mjs standalone.test.mjs native-bundles.test.mjs plugins/dsh-delete-chat/test/*.test.mjs",
     "check:public": "node scripts/check-public.mjs",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "package:standalone": "node scripts/standalone.mjs"
   },
   "engines": { "node": ">=22" }
 }

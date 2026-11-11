@@ -26,9 +26,9 @@ else
   echo "Install DeepSeek Harness and open it once, or install Node.js 22 or newer, then run this installer again."
   exit 1
 fi
-echo "Harness companion plugins — Mac installer"
-echo "Quit DeepSeek Harness completely. The default installs the model pill and local archived-chat deletion."
-echo "Use --plugins archive-delete to install deletion without contacting a model server."
+echo "DeepSeek Harness plugins — Mac installer"
+echo "Quit DeepSeek Harness completely. The installer selects the plugins included in this download."
+echo "Archived-chat deletion alone needs no model server or key. Use --help for this download's options."
 if [ "$#" -eq 0 ]; then
   "$TASK_RUNTIME" "$TASK_DIR/install.mjs" --apply
 else

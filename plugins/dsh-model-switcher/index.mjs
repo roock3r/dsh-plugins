@@ -157,7 +157,10 @@ export function createFetchRoute(operation, bridge) {
   };
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  if (config.setupRequired === true) {
+    throw new Error('Model Switcher needs one-time setup. Quit Harness and follow the setup instructions in this plugin\'s README to verify the model host and save its credential.');
+  }
   // The gateway owns the only generation barrier. A per-agent prepare hook would
   // let an old background request override a newer explicit dropdown selection.
   ctx.inject(['connection', 'credentials', 'llm', 'settings'], scope => {

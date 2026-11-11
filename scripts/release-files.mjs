@@ -3,7 +3,7 @@ import path from 'node:path';
 export const root = path.resolve(import.meta.dirname, '..');
 const files = ['Install.command', 'Uninstall.command', 'package.json', 'install.mjs',
   'README.md', 'AGENTS.md', 'LICENSE',
-  'THIRD-PARTY-NOTICES.md', 'portable.test.mjs', 'suite-installer.test.mjs',
+  'THIRD-PARTY-NOTICES.md', 'portable.test.mjs', 'suite-installer.test.mjs', 'standalone.test.mjs', 'native-bundles.test.mjs',
   '.gitignore', '.gitattributes'];
 const directories = ['docs', 'scripts', '.github', 'plugins/dsh-model-switcher', 'plugins/dsh-delete-chat', 'vendor/yaml'];
 const forbidden = /(?:^|\/)(?:node_modules|\.dsh|backups|artifacts)(?:\/|$)|\.(?:log|sqlite(?:-\w+)?|jsonl|zip|key|pem|gguf|exe|dll)$|(?:^|\/)(?:\.env(?:\..*)?|\.credentials\.yaml|local-model-switch-client\.json|validation\.json)$/i;
@@ -35,8 +35,7 @@ export function releaseFiles() {
   }
   return result.sort();
 }
-export function publicCheck() {
-  const entries = releaseFiles();
+export function checkPublicContents(entries) {
   const privatePatterns = [
     /[A-Z]:[\\/]Users[\\/](?!runneradmin\b)[A-Za-z][^\\/\s"']*[\\/]/i,
     /\/Users\/(?!example\b|runner\b|Shared\b)[A-Za-z][^/\s"']*\//,
@@ -45,12 +44,16 @@ export function publicCheck() {
     /\bsk-[A-Za-z0-9]{24,}\b/,
   ];
   const localSecret = process.env.DSH_RELEASE_SECRET_SCAN;
-  for (const name of entries) {
-    const content = fs.readFileSync(path.join(root, name), 'utf8');
+  for (const [name, bytes] of entries) {
+    if (forbidden.test(name)) throw new Error(`Private artifact in release: ${name}`);
+    const content = Buffer.from(bytes).toString('utf8');
     // This scanner contains its own deny patterns, not machine configuration.
     if (name !== 'scripts/release-files.mjs' && privatePatterns.some(pattern => pattern.test(content))) throw new Error(`Private-looking content found in ${name}`);
     if (localSecret && content.includes(localSecret)) throw new Error(`Credential exclusion failed in ${name}`);
     if (name.endsWith('.command') && content.includes('\r')) throw new Error(`Command file needs LF line endings: ${name}`);
   }
-  return { ok: true, entries: entries.length, exactCredentialScan: localSecret ? 'passed' : 'not supplied' };
+  return { ok: true, entries: entries.size ?? entries.length, exactCredentialScan: localSecret ? 'passed' : 'not supplied' };
+}
+export function publicCheck() {
+  return checkPublicContents(releaseFiles().map(name => [name, fs.readFileSync(path.join(root, name))]));
 }

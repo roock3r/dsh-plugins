@@ -37,6 +37,9 @@ export function createFetchRoute(operation, service) {
 }
 
 export function apply(ctx, config = {}) {
+  if (config.setupRequired === true) {
+    throw new Error('Delete Chat needs one-time setup. Quit Harness and follow the setup instructions in this plugin\'s README to verify the installed Harness build and run the native safety checks.');
+  }
   ctx.inject(['connection', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'sessionProjectionCache', 'storageDomain', 'sessions', 'agents'], scope => {
     const service = createDeletionService(scope, config);
     for (const operation of ['preview', 'delete']) scope.connection.fetch.register(createFetchRoute(operation, service));

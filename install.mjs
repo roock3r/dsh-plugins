@@ -6,18 +6,50 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import { isDeepStrictEqual } from 'node:util';
 import YAML from './vendor/yaml/dist/index.js';
-import { MODELS, MODEL_IDS, hostProvider, hostCredentialRef } from './plugins/dsh-model-switcher/catalog.mjs';
-import { validateGatewayURL, validateHost, validateClientConfig } from './plugins/dsh-model-switcher/settings.mjs';
-import { SUPPORTED_STORAGE_BUILDS } from './plugins/dsh-delete-chat/storage-adapter.mjs';
 
 const options = { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }] };
 const pluginId = 'dsh-model-switcher';
 const modelPluginIds = new Set([pluginId, 'windows-model-switch-client', 'local-model-switch-client']);
-const runtimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs'];
+const runtimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs', 'cordis.patch.yml'];
 const archiveId = 'dsh-delete-chat';
 const archivePluginIds = new Set([archiveId, 'archived-chat-delete']);
-const archiveRuntimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs'];
+const archiveRuntimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs', 'cordis.patch.yml'];
+const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
+
+/** Generated standalone exports contain one root plugin; the source suite has no manifest. */
+export function readInstallerDistribution(sourceRoot = import.meta.dirname) {
+  const filename = path.join(sourceRoot, 'installer-distribution.json');
+  if (!fs.existsSync(filename)) return Object.freeze({ id: 'dsh-plugins', defaultSelection: 'both',
+    roots: Object.freeze({ [pluginId]: `plugins/${pluginId}`, [archiveId]: `plugins/${archiveId}` }),
+    receiptName: 'companion-plugins-last-install.json', backupPrefix: 'companion-plugins' });
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(filename, 'utf8')); }
+  catch { throw new Error('Invalid standalone installer distribution manifest.'); }
+  requireValue(manifest?.version === 1 && Object.keys(manifest).length === 2 &&
+    manifest.plugins && typeof manifest.plugins === 'object' && !Array.isArray(manifest.plugins),
+  'Invalid standalone installer distribution manifest.');
+  const entries = Object.entries(manifest.plugins);
+  requireValue(entries.length === 1 && [pluginId, archiveId].includes(entries[0][0]) && entries[0][1] === '.',
+    'A standalone installer must contain exactly one supported plugin at its repository root.');
+  const id = entries[0][0];
+  return Object.freeze({ id, defaultSelection: id === pluginId ? 'model-switch' : 'archive-delete',
+    roots: Object.freeze({ [id]: '.' }), receiptName: `${id}-last-install.json`, backupPrefix: id });
+}
+
+export const installerDistribution = readInstallerDistribution();
+const sourceFile = (id, filename, sourceRoot = import.meta.dirname) => {
+  requireValue(Object.hasOwn(installerDistribution.roots, id), `This installer does not include ${id}.`);
+  return path.join(sourceRoot, installerDistribution.roots[id], filename);
+};
+const loadSource = (id, filename) => import(pathToFileURL(sourceFile(id, filename)).href);
+const { MODELS, MODEL_IDS, hostProvider, hostCredentialRef } = installerDistribution.roots[pluginId]
+  ? await loadSource(pluginId, 'catalog.mjs') : {};
+const { validateGatewayURL, validateHost, validateClientConfig } = installerDistribution.roots[pluginId]
+  ? await loadSource(pluginId, 'settings.mjs') : {};
+const { SUPPORTED_STORAGE_BUILDS } = installerDistribution.roots[archiveId]
+  ? await loadSource(archiveId, 'storage-adapter.mjs') : {};
 const cleanupHashes = {
   'dsh-workspace': '931ca0cb10c5102066c7723690a887f0e6e8e7ab0ffdee1a782686745b0b934f',
   'dsh-session-query': '76ce2944e561c12f48b5e240d68cafe54ce6d667b1d20722e6939ed834489939',
@@ -25,32 +57,143 @@ const cleanupHashes = {
   'dsh-session-projection-cache': 'faf307dce5db2fb7ff58b4c7d9e544fc7cad5de2f270a89326a8d7bb2bda9c80',
 };
 const sha = value => createHash('sha256').update(value).digest('hex');
-const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 
-export function pluginSelection(value = 'both') {
+export function pluginSelection(value = installerDistribution.defaultSelection) {
   requireValue(['both', 'model-switch', 'archive-delete'].includes(value), 'Use --plugins both, model-switch, or archive-delete.');
-  return { name: value, modelSwitch: value !== 'archive-delete', archiveDelete: value !== 'model-switch' };
+  const selected = { name: value, modelSwitch: value !== 'archive-delete', archiveDelete: value !== 'model-switch' };
+  requireValue((!selected.modelSwitch || installerDistribution.roots[pluginId]) &&
+    (!selected.archiveDelete || installerDistribution.roots[archiveId]),
+  `This distribution installs only ${installerDistribution.id}.`);
+  return selected;
 }
 
-export function configureArchiveProfile(source, { pluginPath, packageRoot }) {
+/** Read only. A native package must match this setup download before it is enabled. */
+export function discoverNativeBundle(profile, id, { sourceRoot = import.meta.dirname } = {}) {
+  requireValue([pluginId, archiveId].includes(id), 'Unknown plugin package.');
+  const profileDir = path.dirname(profile.filename), filename = path.join(profileDir, 'package.json');
+  if (!fs.existsSync(filename)) return null;
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(filename, 'utf8')); }
+  catch { throw new Error(`The ${profile.name} profile package manifest is invalid.`); }
+  requireValue(manifest && typeof manifest === 'object' && !Array.isArray(manifest),
+    `The ${profile.name} profile package manifest is invalid.`);
+  const dependencies = manifest?.dependencies || {};
+  const bundles = manifest?.dsh?.profile?.bundles || [];
+  requireValue(dependencies && typeof dependencies === 'object' && !Array.isArray(dependencies) && Array.isArray(bundles),
+    `The ${profile.name} profile package manifest is invalid.`);
+  const dependency = Object.hasOwn(dependencies, id), selected = bundles.filter(name => name === id);
+  if (!dependency && !selected.length) return null;
+  requireValue(!(dependency && typeof dependencies[id] === 'string' && selected.length === 0),
+    `Select Enable now for ${id} in Harness Plugins, then quit Harness and rerun setup. The plugin stays off until setup completes.`);
+  requireValue(dependency && typeof dependencies[id] === 'string' && selected.length === 1,
+    `The ${id} dependency and selected bundle do not agree in ${profile.name}. Repair that installation before setup.`);
+  const packageDir = path.join(profileDir, 'node_modules', id);
+  const failure = `The native ${id} package does not match this setup download. Use the same verified release and review its bundle before continuing.`;
+  try {
+    const installed = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
+    const supplied = JSON.parse(fs.readFileSync(sourceFile(id, 'package.json', sourceRoot), 'utf8'));
+    requireValue(installed.name === id && supplied.name === id && installed.dsh?.bundle?.patch === './cordis.patch.yml', failure);
+    for (const field of ['version', 'type', 'main', 'exports', 'dsh']) requireValue(isDeepStrictEqual(installed[field], supplied[field]), failure);
+    const patch = YAML.parse(fs.readFileSync(path.join(packageDir, 'cordis.patch.yml'), 'utf8'));
+    const loaderId = `${id}-bundle`;
+    requireValue(isDeepStrictEqual(patch, [{ insert: [{ id: loaderId, name: id, disabled: true, config: { setupRequired: true } }] }]), failure);
+    for (const name of (id === pluginId ? runtimeFiles : archiveRuntimeFiles).filter(name => name !== 'package.json' && name !== 'LICENSE')) {
+      requireValue(fs.readFileSync(path.join(packageDir, name)).equals(fs.readFileSync(sourceFile(id, name, sourceRoot))), failure);
+    }
+    return Object.freeze({ id, loaderId, packageDir: fs.realpathSync(packageDir) });
+  } catch (error) {
+    if (error.message === failure) throw error;
+    throw new Error(failure);
+  }
+}
+
+/** Native standalone setup follows the profiles selected in Harness's plugin manager. */
+export function selectInstallProfiles(profiles, { sourceRoot = import.meta.dirname } = {}) {
+  if (installerDistribution.id === 'dsh-plugins') return profiles;
+  const nativeProfiles = profiles.filter(profile => discoverNativeBundle(profile, installerDistribution.id, { sourceRoot }));
+  return nativeProfiles.length ? nativeProfiles : profiles;
+}
+
+/** Convert one recognized file registration into an override of a verified dormant bundle. */
+function configureNativeRegistration(doc, before, expected, { nativeBundle, id, ids, pluginPath, legacyPath, plugin, configKeys }) {
+  requireValue(nativeBundle.id === id && nativeBundle.loaderId === `${id}-bundle`, 'Invalid native bundle proof.');
+  const validConfig = config => config === undefined || (config !== null && typeof config === 'object' && !Array.isArray(config));
+  const ownIds = new Set([...ids, nativeBundle.loaderId]);
+  const ownPaths = new Set([pathToFileURL(path.join(pluginPath, 'index.mjs')).href,
+    pathToFileURL(path.join(path.dirname(pluginPath), legacyPath, 'index.mjs')).href]);
+  function inspect(value, location = [], ancestors = new Set()) {
+    if (!value || typeof value !== 'object') return;
+    requireValue(!ancestors.has(value), 'Circular plugin configuration requires manual review.');
+    if (!Array.isArray(value) && (ownIds.has(value.id) || value.name === id || ownPaths.has(value.name))) {
+      const direct = location.length === 1 && Number.isInteger(location[0]);
+      const insertion = location.length === 3 && Number.isInteger(location[0]) && location[1] === 'insert' && Number.isInteger(location[2]);
+      requireValue(direct || insertion, 'A nested plugin registration requires manual review before native setup.');
+      requireValue(!ownPaths.has(value.name) || ids.has(value.id),
+        'An unexpected plugin ID points to this runtime. Review it before native setup.');
+    }
+    const next = new Set(ancestors); next.add(value);
+    if (Array.isArray(value)) value.forEach((child, index) => inspect(child, [...location, index], next));
+    else for (const [key, child] of Object.entries(value)) inspect(child, [...location, key], next);
+  }
+  inspect(before);
+  requireValue(!before.some(row => (row.name === id && row.id !== nativeBundle.loaderId) ||
+    (row.insert || []).some(entry => entry.name === id)),
+  'An unexpected registration already uses this native package. Review it before setup.');
+  const direct = before.flatMap((row, i) => ownIds.has(row.id) ? [i] : []);
+  requireValue(direct.length <= 1, 'Duplicate native plugin overrides require manual review.');
+  if (direct.length) {
+    const existing = before[direct[0]];
+    requireValue(existing.id === nativeBundle.loaderId && (existing.name === undefined || existing.name === id) &&
+      Object.keys(existing).every(key => ['id', 'name', 'disabled', 'config'].includes(key)) &&
+      (existing.disabled === undefined || typeof existing.disabled === 'boolean') &&
+      validConfig(existing.config) &&
+      Object.keys(existing.config || {}).every(key => configKeys.includes(key) || (key === 'setupRequired' && existing.config[key] === true)),
+    'Unexpected native plugin override. Review it before setup.');
+  }
+  const found = before.flatMap((row, i) => (row.insert || []).flatMap((entry, j) => ownIds.has(entry.id) ? [[i, j]] : []));
+  requireValue(found.length <= 1, 'Duplicate file/native plugin registrations require manual review.');
+  if (found.length) {
+    const [i, j] = found[0], entry = before[i].insert[j];
+    const knownPath = entry.name === pathToFileURL(path.join(pluginPath, 'index.mjs')).href ||
+      (entry.id !== id && entry.name === pathToFileURL(path.join(path.dirname(pluginPath), legacyPath, 'index.mjs')).href);
+    requireValue(ids.has(entry.id) && knownPath &&
+      Object.keys(entry).every(key => ['id', 'name', 'config'].includes(key)) &&
+      validConfig(entry.config) &&
+      Object.keys(entry.config || {}).every(key => configKeys.includes(key)),
+    'The existing file plugin has an unexpected location or configuration. Review it before native setup.');
+    expected[i].insert.splice(j, 1); doc.deleteIn([i, 'insert', j]);
+    if (!expected[i].insert.length && Object.keys(expected[i]).length === 1) { expected.splice(i, 1); doc.delete(i); }
+  }
+  const index = expected.findIndex(row => row.id === nativeBundle.loaderId);
+  if (index < 0) { expected.push(plugin); doc.add(plugin); }
+  else { expected[index] = plugin; doc.set(index, plugin); }
+}
+
+export function configureArchiveProfile(source, { pluginPath, packageRoot, nativeBundle }) {
   requireValue(typeof packageRoot === 'string' && path.isAbsolute(packageRoot), 'The archive plugin needs an absolute verified Harness package directory.');
   const doc = YAML.parseDocument(source || '[]\n', options);
   requireValue(doc.errors.length === 0, 'Harness profile contains invalid YAML.');
   const before = doc.toJS();
   requireValue(Array.isArray(before), 'Harness profiles must contain a patch list.');
   const expected = structuredClone(before);
-  const plugin = { id: archiveId, name: pathToFileURL(path.join(pluginPath, 'index.mjs')).href, config: { packageRoot } };
-  requireValue(!before.some(row => archivePluginIds.has(row.id)), 'Unexpected direct archive-plugin override.');
-  const found = before.flatMap((row, i) => (row.insert || []).flatMap((item, j) => archivePluginIds.has(item.id) ? [[i, j]] : []));
-  requireValue(found.length <= 1, 'Duplicate archive plugins require manual review.');
-  if (found.length) {
-    const [i, j] = found[0], existing = before[i].insert[j];
-    const knownLegacy = existing.id === 'archived-chat-delete' && existing.name ===
-      pathToFileURL(path.join(path.dirname(pluginPath), 'archived-chat-delete', 'index.mjs')).href;
-    requireValue((existing.name === plugin.name || knownLegacy) && Object.keys(existing.config || {}).every(key => key === 'packageRoot'),
-      'The archive plugin has an unexpected location or configuration. Review it before upgrading.');
-    expected[i].insert[j] = plugin; doc.setIn([i, 'insert', j], plugin);
-  } else { expected.push({ insert: [plugin] }); doc.add({ insert: [plugin] }); }
+  const plugin = nativeBundle
+    ? { id: nativeBundle.loaderId, name: archiveId, disabled: false, config: { packageRoot } }
+    : { id: archiveId, name: pathToFileURL(path.join(pluginPath, 'index.mjs')).href, config: { packageRoot } };
+  if (nativeBundle) configureNativeRegistration(doc, before, expected, { nativeBundle, id: archiveId, ids: archivePluginIds,
+    pluginPath, legacyPath: 'archived-chat-delete', plugin, configKeys: ['packageRoot'] });
+  else {
+    requireValue(!before.some(row => archivePluginIds.has(row.id) || row.id === `${archiveId}-bundle`), 'Unexpected direct archive-plugin override.');
+    const found = before.flatMap((row, i) => (row.insert || []).flatMap((item, j) => archivePluginIds.has(item.id) ? [[i, j]] : []));
+    requireValue(found.length <= 1, 'Duplicate archive plugins require manual review.');
+    if (found.length) {
+      const [i, j] = found[0], existing = before[i].insert[j];
+      const knownLegacy = existing.id === 'archived-chat-delete' && existing.name ===
+        pathToFileURL(path.join(path.dirname(pluginPath), 'archived-chat-delete', 'index.mjs')).href;
+      requireValue((existing.name === plugin.name || knownLegacy) && Object.keys(existing.config || {}).every(key => key === 'packageRoot'),
+        'The archive plugin has an unexpected location or configuration. Review it before upgrading.');
+      expected[i].insert[j] = plugin; doc.setIn([i, 'insert', j], plugin);
+    } else { expected.push({ insert: [plugin] }); doc.add({ insert: [plugin] }); }
+  }
   const output = String(doc);
   requireValue(JSON.stringify(YAML.parse(output, options)) === JSON.stringify(expected), 'Unexpected archive profile rewrite.');
   requireValue((output.match(/!!js\b/g) || []).length === (source.match(/!!js\b/g) || []).length, 'JavaScript configuration tags changed.');
@@ -60,13 +203,16 @@ export function configureArchiveProfile(source, { pluginPath, packageRoot }) {
 export function hasArchivePlugin(source) {
   const doc = YAML.parseDocument(source, options);
   requireValue(doc.errors.length === 0 && Array.isArray(doc.toJS()), 'Harness profile contains invalid YAML.');
-  return doc.toJS().some(row => archivePluginIds.has(row.id) || (row.insert || []).some(item => archivePluginIds.has(item.id)));
+  const known = id => archivePluginIds.has(id) || id === `${archiveId}-bundle`;
+  return doc.toJS().some(row => known(row.id) || (row.insert || []).some(item => known(item.id)));
 }
 
 /** Read installed code only. Unknown builds never receive an enabled deletion plugin. */
 export function verifyArchivePackages(packageRoot) {
+  requireValue(installerDistribution.roots[archiveId], 'This installer does not include archived-chat deletion.');
   requireValue(typeof packageRoot === 'string' && path.isAbsolute(packageRoot), 'An absolute Harness package directory is required.');
-  const failure = 'This installed Harness build has not been verified for archived-chat deletion. Update the plugin adapter or use --plugins model-switch; no files were changed.';
+  const alternative = installerDistribution.roots[pluginId] ? ' or use --plugins model-switch' : '';
+  const failure = `This installed Harness build has not been verified for archived-chat deletion. Update the plugin adapter${alternative}; no files were changed.`;
   try {
     const jsonl = path.join(packageRoot, 'dsh-session-persistence-jsonl');
     const metadata = JSON.parse(fs.readFileSync(path.join(jsonl, 'package.json'), 'utf8'));
@@ -86,11 +232,11 @@ export function verifyArchivePackages(packageRoot) {
 export function runArchiveSmokeTest(packageRoot, { sourceRoot = import.meta.dirname, runtime = process.execPath, runner = execFileSync } = {}) {
   let output;
   try {
-    output = runner(runtime, [path.join(sourceRoot, 'plugins/dsh-delete-chat/self-test.mjs')], {
+    output = runner(runtime, [sourceFile(archiveId, 'self-test.mjs', sourceRoot)], {
       env: { ...process.env, DSH_DELETE_TEST_PACKAGE_ROOT: packageRoot }, encoding: 'utf8',
       timeout: 90_000, maxBuffer: 512 * 1024, windowsHide: true,
     });
-  } catch { throw new Error('The archived-chat safety test failed or timed out. No profiles were changed. Run --plugins model-switch to install only the model pill, or review the supported Harness version.'); }
+  } catch { throw new Error('The archived-chat safety test failed or timed out. No profiles were changed. Review the supported Harness version.'); }
   let proof;
   try { proof = JSON.parse(String(output).trim().split(/\r?\n/).at(-1)); }
   catch { throw new Error('The archived-chat safety test returned no valid proof. No profiles were changed.'); }
@@ -127,7 +273,7 @@ export function discoverArchiveRoots(profiles, { appBundle, cliPackageRoot } = {
   return { roots, skipped };
 }
 
-export function configureProfile(source, { host: rawHost, pluginPath }) {
+export function configureProfile(source, { host: rawHost, pluginPath, nativeBundle }) {
   const host = validateHost(rawHost);
   const doc = YAML.parseDocument(source || '[]\n', options);
   requireValue(doc.errors.length === 0, 'Harness profile contains invalid YAML.');
@@ -154,20 +300,26 @@ export function configureProfile(source, { host: rawHost, pluginPath }) {
     const row = { id: 'llm-pi-ai', config: { providers: { [host.provider]: provider } } };
     expected.push(row); doc.add(row);
   }
-  const plugin = { id: pluginId, name: pathToFileURL(path.join(pluginPath, 'index.mjs')).href, config: {} };
-  requireValue(!before.some(row => modelPluginIds.has(row.id)), 'Unexpected direct override for the Windows switch plugin.');
-  const found = [];
-  for (const [i, row] of before.entries()) for (const [j, item] of (row.insert || []).entries()) if (modelPluginIds.has(item.id)) found.push([i, j]);
-  requireValue(found.length <= 1, 'Duplicate Windows switch plugins require manual review.');
-  if (found.length) {
-    const [i, j] = found[0];
-    const existing = before[i].insert[j];
-    const knownLegacy = existing.id !== pluginId && existing.name ===
-      pathToFileURL(path.join(path.dirname(pluginPath), 'local-model-switch-client', 'index.mjs')).href;
-    requireValue((existing.name === plugin.name || knownLegacy) && Object.keys(existing.config || {}).length === 0,
-      'The Windows switch plugin points to an unexpected location or configuration.');
-    expected[i].insert[j] = plugin; doc.setIn([i, 'insert', j], plugin);
-  } else { expected.push({ insert: [plugin] }); doc.add({ insert: [plugin] }); }
+  const plugin = nativeBundle
+    ? { id: nativeBundle.loaderId, name: pluginId, disabled: false, config: {} }
+    : { id: pluginId, name: pathToFileURL(path.join(pluginPath, 'index.mjs')).href, config: {} };
+  if (nativeBundle) configureNativeRegistration(doc, before, expected, { nativeBundle, id: pluginId, ids: modelPluginIds,
+    pluginPath, legacyPath: 'local-model-switch-client', plugin, configKeys: [] });
+  else {
+    requireValue(!before.some(row => modelPluginIds.has(row.id) || row.id === `${pluginId}-bundle`), 'Unexpected direct override for the Windows switch plugin.');
+    const found = [];
+    for (const [i, row] of before.entries()) for (const [j, item] of (row.insert || []).entries()) if (modelPluginIds.has(item.id)) found.push([i, j]);
+    requireValue(found.length <= 1, 'Duplicate Windows switch plugins require manual review.');
+    if (found.length) {
+      const [i, j] = found[0];
+      const existing = before[i].insert[j];
+      const knownLegacy = existing.id !== pluginId && existing.name ===
+        pathToFileURL(path.join(path.dirname(pluginPath), 'local-model-switch-client', 'index.mjs')).href;
+      requireValue((existing.name === plugin.name || knownLegacy) && Object.keys(existing.config || {}).length === 0,
+        'The Windows switch plugin points to an unexpected location or configuration.');
+      expected[i].insert[j] = plugin; doc.setIn([i, 'insert', j], plugin);
+    } else { expected.push({ insert: [plugin] }); doc.add({ insert: [plugin] }); }
+  }
   const output = String(doc);
   requireValue(JSON.stringify(YAML.parse(output, options)) === JSON.stringify(expected), 'Unexpected profile rewrite.');
   requireValue((output.match(/!!js\b/g) || []).length === (source.match(/!!js\b/g) || []).length, 'JavaScript configuration tags changed.');
@@ -231,7 +383,7 @@ export function harnessProcessesRunning(output, { pid = process.pid, appBundle, 
     return [...bundles].some(bundle => ['MacOS', 'Frameworks'].some(part => command.includes(path.join(bundle, 'Contents', part) + path.sep))) ||
       Boolean(cliEntry && command.includes(cliEntry)) ||
       /DeepSeek Harness\.app\/Contents\/(MacOS\/|Frameworks\/)/.test(command) ||
-      /(?:@deepseek-ai\/dsh\/lib\/bin\.js|\bdsh (?:web|run|start)\b)/.test(command);
+      /(?:@deepseek-ai\/dsh\/lib\/bin\.js|\bdsh (?:web|run|start|plugin)\b)/.test(command);
   });
 }
 
@@ -310,6 +462,8 @@ export function rollback(backupRoot, { closedCheck = assertHarnessClosed, home =
   noSymlinkParents(path.join(backupRoot, 'manifest.json'), home);
   const manifest = JSON.parse(fs.readFileSync(path.join(backupRoot, 'manifest.json'), 'utf8'));
   requireValue(manifest.version === 1 && manifest.home === home && Array.isArray(manifest.files), 'Invalid rollback manifest.');
+  requireValue(installerDistribution.id === 'dsh-plugins' || manifest.metadata?.distribution === installerDistribution.id,
+    'This backup belongs to another installer. Use the installer that created that transaction.');
   const runtimeContext = manifest.metadata && typeof manifest.metadata === 'object' && !Array.isArray(manifest.metadata) ? manifest.metadata : {};
   closedCheck(runtimeContext);
   const targets = new Set();
@@ -332,6 +486,14 @@ export function rollback(backupRoot, { closedCheck = assertHarnessClosed, home =
     if (row.existed) atomicWrite(row.filename, fs.readFileSync(path.join(backupRoot, row.before)), row.beforeMode ?? row.mode);
     else fs.unlinkSync(row.filename);
   }
+}
+
+/** Standalone uninstall never falls back to another plugin's or the suite's receipt. */
+export function lastInstallMarker(home) {
+  if (installerDistribution.id === 'dsh-plugins' && !fs.existsSync(path.join(home, installerDistribution.receiptName))) {
+    return path.join(home, 'local-model-switch-last-install.json');
+  }
+  return path.join(home, installerDistribution.receiptName);
 }
 
 export function parseArguments(args) {
@@ -359,9 +521,14 @@ export function parseArguments(args) {
 
 /** Plan entirely in memory; archive-only mode never reads model config or credentials. */
 export function buildInstallPlan({ home, profiles, selected = pluginSelection(), host, key, archiveRoots = {}, sourceRoot = import.meta.dirname }) {
+  const permitted = pluginSelection(selected.name);
+  requireValue(selected.modelSwitch === permitted.modelSwitch && selected.archiveDelete === permitted.archiveDelete,
+    'Invalid plugin selection.');
+  profiles = selectInstallProfiles(profiles, { sourceRoot });
   const modelPath = path.join(home, 'plugins', pluginId);
   const archivePath = path.join(home, 'plugins', archiveId);
   const changes = [];
+  let copyModelRuntime = false, copyArchiveRuntime = false;
   const add = (filename, content, mode = 0o600) => {
     const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
     if (!fs.existsSync(filename) || !bytes.equals(fs.readFileSync(filename)) ||
@@ -371,11 +538,15 @@ export function buildInstallPlan({ home, profiles, selected = pluginSelection(),
     const original = fs.readFileSync(filename, 'utf8');
     let output = original, changed = false;
     if (selected.modelSwitch) {
-      const result = configureProfile(output, { host, pluginPath: modelPath });
+      const nativeBundle = discoverNativeBundle({ name, filename }, pluginId, { sourceRoot });
+      const result = configureProfile(output, { host, pluginPath: modelPath, nativeBundle });
+      copyModelRuntime ||= !nativeBundle;
       output = result.output; changed ||= result.changed;
     }
     if (selected.archiveDelete && archiveRoots[name]) {
-      const result = configureArchiveProfile(output, { pluginPath: archivePath, packageRoot: archiveRoots[name] });
+      const nativeBundle = discoverNativeBundle({ name, filename }, archiveId, { sourceRoot });
+      const result = configureArchiveProfile(output, { pluginPath: archivePath, packageRoot: archiveRoots[name], nativeBundle });
+      copyArchiveRuntime ||= !nativeBundle;
       output = result.output; changed ||= result.changed;
     }
     if (changed) add(filename, output);
@@ -388,11 +559,11 @@ export function buildInstallPlan({ home, profiles, selected = pluginSelection(),
     const credentialsFile = path.join(home, '.credentials.yaml');
     const credentials = configureCredentials(fs.existsSync(credentialsFile) ? fs.readFileSync(credentialsFile, 'utf8') : '', key, host.credentialRef);
     add(credentialsFile, credentials.output);
-    for (const name of runtimeFiles) add(path.join(modelPath, name), fs.readFileSync(path.join(sourceRoot, 'plugins', pluginId, name)), 0o644);
+    if (copyModelRuntime) for (const name of runtimeFiles) add(path.join(modelPath, name), fs.readFileSync(sourceFile(pluginId, name, sourceRoot)), 0o644);
   }
   if (selected.archiveDelete) {
     requireValue(Object.keys(archiveRoots).length > 0, 'No archive profile runtime was verified.');
-    for (const name of archiveRuntimeFiles) add(path.join(archivePath, name), fs.readFileSync(path.join(sourceRoot, 'plugins', archiveId, name)), 0o644);
+    if (copyArchiveRuntime) for (const name of archiveRuntimeFiles) add(path.join(archivePath, name), fs.readFileSync(sourceFile(archiveId, name, sourceRoot)), 0o644);
   }
   return changes;
 }
@@ -400,7 +571,8 @@ export function buildInstallPlan({ home, profiles, selected = pluginSelection(),
 async function main() {
   const args = parseArguments(process.argv.slice(2));
   if (args['--help']) {
-    console.log('Harness companion plugins for macOS\n\nInstall.command [--apply | --check] [--plugins both | model-switch | archive-delete]\n  --server URL --host-id ID --host-label LABEL --ask-key\n  --app-bundle PATH --cli-package-root PATH\n  --rollback [BACKUP_DIRECTORY]\n\nDefault: both plugins. Archive-only needs no model-host connection or key. Keys are entered at a hidden prompt. --check runs synthetic safety tests without changing user profiles or chats.');
+    const selectionHelp = installerDistribution.id === 'dsh-plugins' ? 'both | model-switch | archive-delete' : installerDistribution.defaultSelection;
+    console.log(`${installerDistribution.id} for macOS\n\nInstall.command [--apply | --check] [--plugins ${selectionHelp}]\n  --server URL --host-id ID --host-label LABEL --ask-key\n  --app-bundle PATH --cli-package-root PATH\n  --rollback [BACKUP_DIRECTORY]\n\nDefault: ${installerDistribution.defaultSelection}. Archive-only needs no model-host connection or key. Keys are entered at a hidden prompt. --check runs synthetic safety tests without changing user profiles or chats.`);
     return;
   }
   requireValue(Number(process.versions.node.split('.')[0]) >= 22, 'Node.js 22 or newer is required.');
@@ -413,8 +585,7 @@ async function main() {
   const cliPackageRoot = discoverCliPackageRoot({ explicit: args['--cli-package-root'] || process.env.DSH_CLI_PACKAGE_ROOT, executable });
   const closedCheck = () => assertHarnessClosed({ appBundle, cliPackageRoot });
   if (args['--rollback']) {
-    const marker = fs.existsSync(path.join(home, 'companion-plugins-last-install.json')) ? 'companion-plugins-last-install.json' : 'local-model-switch-last-install.json';
-    const receipt = typeof args['--rollback'] === 'string' ? {} : JSON.parse(fs.readFileSync(path.join(home, marker), 'utf8'));
+    const receipt = typeof args['--rollback'] === 'string' ? {} : JSON.parse(fs.readFileSync(lastInstallMarker(home), 'utf8'));
     const backup = typeof args['--rollback'] === 'string' ? args['--rollback'] : receipt.backup;
     rollback(backup, { home, closedCheck: (metadata = {}) => assertHarnessClosed({ appBundle,
       cliPackageRoot: typeof metadata.cliPackageRoot === 'string' ? metadata.cliPackageRoot : receipt.cliPackageRoot || cliPackageRoot,
@@ -422,7 +593,7 @@ async function main() {
     console.log('Previous Harness files restored. Restart Harness normally.'); return;
   }
   const selected = pluginSelection(args['--plugins']);
-  const profiles = ['desktop', 'web', 'headless'].map(name => ({ name, filename: path.join(home, 'profiles', name, 'cordis.patch.yml') })).filter(row => fs.existsSync(row.filename));
+  const profiles = selectInstallProfiles(['desktop', 'web', 'headless'].map(name => ({ name, filename: path.join(home, 'profiles', name, 'cordis.patch.yml') })).filter(row => fs.existsSync(row.filename)));
   requireValue(profiles.length > 0, 'Open DeepSeek Harness once and quit it before installing. No existing profile was found.');
   // Native filesystem validation also requires the real Harness processes to be stopped.
   if (args['--apply'] || selected.archiveDelete) closedCheck();
@@ -468,9 +639,9 @@ async function main() {
   if (!contract.verified) console.log(contract.note);
   if (!args['--apply']) { console.log('Check only: no user profiles or chats changed. Run with --apply to install.'); return; }
   if (changes.length === 0) { console.log('Already installed with these settings. Restart Harness if needed.'); return; }
-  const backup = path.join(home, 'backups', `companion-plugins-${new Date().toISOString().replace(/[:.]/g, '-')}`);
-  const metadata = { plugins: selected.name, appBundle, cliPackageRoot, archiveProfiles: Object.keys(archiveRoots), archiveProofs, skippedProfiles: skipped, installedAt: new Date().toISOString() };
-  changes.push({ filename: path.join(home, 'companion-plugins-last-install.json'), content: JSON.stringify({ backup, ...metadata }, null, 2) + '\n' });
+  const backup = path.join(home, 'backups', `${installerDistribution.backupPrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  const metadata = { distribution: installerDistribution.id, plugins: selected.name, appBundle, cliPackageRoot, archiveProfiles: Object.keys(archiveRoots), archiveProofs, skippedProfiles: skipped, installedAt: new Date().toISOString() };
+  changes.push({ filename: path.join(home, installerDistribution.receiptName), content: JSON.stringify({ backup, ...metadata }, null, 2) + '\n' });
   applyTransaction(changes, { home, backupRoot: backup, metadata, closedCheck });
   console.log('Installed. Open Harness normally. Existing providers, defaults, and chats were preserved.');
   if (host) console.log(`Choose a remote model under ${host.label}; all clients of that host share its loaded model.`);

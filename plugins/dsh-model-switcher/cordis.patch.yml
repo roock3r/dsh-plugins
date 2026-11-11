@@ -1,0 +1,8 @@
+# One-time setup verifies the gateway and saves this machine's host credentials.
+# A distinct dormant row can coexist with earlier file-based installations.
+- insert:
+    - id: dsh-model-switcher-bundle
+      name: dsh-model-switcher
+      disabled: true
+      config:
+        setupRequired: true

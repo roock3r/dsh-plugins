@@ -8,6 +8,13 @@ Experimental suite release: **`v0.1.0-alpha.1`**.
 Source: [`roock3r/dsh-plugins`](https://github.com/roock3r/dsh-plugins).
 See [GitHub releases](https://github.com/roock3r/dsh-plugins/releases) for downloads.
 
+This repository remains the canonical source workspace. Individual distributions
+are available through [dsh-delete-chat](https://github.com/roock3r/dsh-delete-chat)
+and [dsh-model-switcher](https://github.com/roock3r/dsh-model-switcher), each with
+its own GitHub plugin bundle and self-contained Mac setup. Register the downloaded
+bundle with **Enable now**; its individual plugin stays off until setup succeeds.
+See [standalone distribution maintenance](docs/standalone-distributions.md).
+
 | Plugin | Controls | Runs on |
 | --- | --- | --- |
 | [dsh-model-switcher](plugins/dsh-model-switcher/README.md) | Active model on a configured Windows gateway | Mac Harness client; inference stays on Windows |

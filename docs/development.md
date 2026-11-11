@@ -8,6 +8,7 @@ for portable tests or packaging.
 npm test
 npm run check:public
 npm run package
+npm run package:standalone
 ```
 
 Tests without an installed runtime skip installed-Harness fixtures. The portable
@@ -54,3 +55,9 @@ The root `dsh-plugins` package owns shared scripts and the combined installer.
 Each plugin has its own package metadata and Harness client-module identity.
 `private: true` prevents accidental npm publication; GitHub source sharing is
 independent of npm publishing. Existing RPC and host-config names stay compatible.
+
+The [standalone exporter](standalone-distributions.md) generates one root package
+per repository, complete with its local setup, dormant GitHub bundle, and source
+provenance. Root tests execute each generated package in an isolated temporary
+directory with the other plugin absent. Keep source edits in this workspace;
+publish copies of the final exports rather than editing the generated mirrors.

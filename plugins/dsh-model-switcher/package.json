@@ -8,9 +8,11 @@
   "author": "Cristian Silva",
   "repository": { "type": "git", "url": "https://github.com/roock3r/dsh-plugins.git", "directory": "plugins/dsh-model-switcher" },
   "main": "index.mjs",
-  "exports": { ".": "./index.mjs", "./client": "./client.js", "./package.json": "./package.json" },
+  "exports": { ".": "./index.mjs", "./client": "./client.js", "./package.json": "./package.json", "./cordis.patch.yml": "./cordis.patch.yml" },
   "engines": { "node": ">=22" },
   "dsh": {
+    "manifestVersion": 1,
+    "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "platform": "web",
       "inject": [

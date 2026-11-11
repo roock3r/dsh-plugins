@@ -1,16 +1,17 @@
 # Validation record — 2026-11-11
 
-After workspace/package renaming and MIT notice installation: 108 checks passed against the installed CLI
-runtime; the one Darwin-only contention test remains skipped on Windows. This
-includes installed license preservation, legacy installer migration, and actual Harness module discovery for
-`dsh-delete-chat` and `dsh-model-switcher`. Three native desktop checks also passed.
-The combined ZIP was rebuilt under the new folder structure and rescanned.
+After standalone GitHub bundle integration: 121 checks passed against the
+installed CLI runtime; one Darwin-only contention test remains skipped on Windows.
+Coverage includes license preservation, native and legacy registration migration,
+profile isolation, rollback ownership, and independent export packaging.
 
 | Check | Result |
 | --- | --- |
-| Portable suite without installed Harness | 92 passed; five runtime/platform checks skipped |
-| Suite with installed Windows CLI runtime | 108 passed; one native Darwin contention test skipped |
+| Portable suite without installed Harness | 104 passed; six runtime/platform checks skipped |
+| Suite with installed Windows CLI runtime | 121 passed; one native Darwin contention test skipped |
 | Native Windows desktop runtime preflight | Three full synthetic checks passed; exit 0 |
+| Native bundle metadata and setup gates | Three checks passed against the desktop runtime |
+| Both standalone exports with actual CLI and desktop runtimes | Discovery, HTTPS install spec, migration, isolation, idempotence, rollback, and changed-runtime refusal passed |
 | Shell syntax | Both command launchers parsed successfully |
 | Real credential exclusion | Passed during local release packaging; no key included |
 | Live Mac installation / UI / Windows connection | Not yet performed |

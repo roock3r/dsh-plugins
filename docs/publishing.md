@@ -9,6 +9,14 @@ The repository contains `dsh-delete-chat` and `dsh-model-switcher` plus their
 combined Mac installer. Existing plugin package versions remain `1.0.0` and
 `2.1.0`; the suite version identifies this initial public distribution.
 
+Individual plugin publication uses the generated repositories
+[`roock3r/dsh-delete-chat`](https://github.com/roock3r/dsh-delete-chat) and
+[`roock3r/dsh-model-switcher`](https://github.com/roock3r/dsh-model-switcher).
+See [standalone distribution maintenance](standalone-distributions.md). Both
+GitHub bundles register dormant plugin rows that require one-time local setup; their bundled
+installer currently targets macOS, even though archive runtime checks also cover
+Windows. Windows activation is not automated by this installer.
+
 Verify the remote commit, release tag, and uploaded asset hashes on GitHub before
 reporting a completed publication. Keep the release contents and package receipt
 aligned with the tagged source.

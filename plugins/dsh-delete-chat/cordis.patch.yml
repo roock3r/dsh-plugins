@@ -1,0 +1,8 @@
+# One-time setup verifies the installed Harness build using synthetic storage.
+# A distinct dormant row can coexist with earlier file-based installations.
+- insert:
+    - id: dsh-delete-chat-bundle
+      name: dsh-delete-chat
+      disabled: true
+      config:
+        setupRequired: true
