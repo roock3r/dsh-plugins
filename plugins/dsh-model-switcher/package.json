@@ -1,0 +1,22 @@
+{
+  "name": "dsh-model-switcher",
+  "version": "2.1.0",
+  "type": "module",
+  "description": "DeepSeek Harness model-host picker for a shared Windows gateway",
+  "private": true,
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs", "./client": "./client.js", "./package.json": "./package.json" },
+  "engines": { "node": ">=22" },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-model-selection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session"
+      ],
+      "external": ["react"]
+    }
+  }
+}
