@@ -1,8 +1,11 @@
 {
   "name": "dsh-plugins",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "DeepSeek Harness companion plugins and a combined Mac installer",
   "private": true,
+  "license": "MIT",
+  "author": "Cristian Silva",
+  "repository": { "type": "git", "url": "https://github.com/roock3r/dsh-plugins.git" },
   "type": "module",
   "workspaces": ["plugins/dsh-model-switcher", "plugins/dsh-delete-chat"],
   "scripts": {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 export const root = path.resolve(import.meta.dirname, '..');
 const files = ['Install.command', 'Uninstall.command', 'package.json', 'install.mjs',
-  'README.md', 'AGENTS.md',
+  'README.md', 'AGENTS.md', 'LICENSE',
   'THIRD-PARTY-NOTICES.md', 'portable.test.mjs', 'suite-installer.test.mjs',
   '.gitignore', '.gitattributes'];
 const directories = ['docs', 'scripts', '.github', 'plugins/dsh-model-switcher', 'plugins/dsh-delete-chat', 'vendor/yaml'];

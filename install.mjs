@@ -14,10 +14,10 @@ import { SUPPORTED_STORAGE_BUILDS } from './plugins/dsh-delete-chat/storage-adap
 const options = { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }] };
 const pluginId = 'dsh-model-switcher';
 const modelPluginIds = new Set([pluginId, 'windows-model-switch-client', 'local-model-switch-client']);
-const runtimeFiles = ['package.json', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs'];
+const runtimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs'];
 const archiveId = 'dsh-delete-chat';
 const archivePluginIds = new Set([archiveId, 'archived-chat-delete']);
-const archiveRuntimeFiles = ['package.json', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs'];
+const archiveRuntimeFiles = ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs'];
 const cleanupHashes = {
   'dsh-workspace': '931ca0cb10c5102066c7723690a887f0e6e8e7ab0ffdee1a782686745b0b934f',
   'dsh-session-query': '76ce2944e561c12f48b5e240d68cafe54ce6d667b1d20722e6939ed834489939',

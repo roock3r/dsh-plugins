@@ -28,8 +28,8 @@ function fixture(run) {
   const sourceRoot = path.join(temporary, 'source'); fs.mkdirSync(sourceRoot);
   const fakeArchive = path.join(sourceRoot, 'plugins/dsh-delete-chat'); fs.mkdirSync(fakeArchive, { recursive: true });
   const fakeModel = path.join(sourceRoot, 'plugins/dsh-model-switcher'); fs.mkdirSync(fakeModel, { recursive: true });
-  for (const name of ['package.json', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs']) fs.writeFileSync(path.join(fakeModel, name), `fixture ${name}`);
-  for (const name of ['package.json', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs']) fs.writeFileSync(path.join(fakeArchive, name), `fixture archive ${name}`);
+  for (const name of ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'catalog.mjs', 'settings.mjs']) fs.writeFileSync(path.join(fakeModel, name), `fixture ${name}`);
+  for (const name of ['package.json', 'LICENSE', 'index.mjs', 'client.js', 'service.mjs', 'storage-adapter.mjs', 'posix-quarantine.mjs']) fs.writeFileSync(path.join(fakeArchive, name), `fixture archive ${name}`);
   try { return run({ temporary, home, profiles, sourceRoot, fakeArchive }); }
   finally {
     const resolved = path.resolve(temporary);
@@ -196,7 +196,7 @@ test('archive-only plan does not parse or change credentials, model config or pr
   const plan = buildInstallPlan({ home, profiles, sourceRoot, selected: pluginSelection('archive-delete'), archiveRoots: roots });
   assert.ok(plan.every(row => !row.filename.endsWith('.credentials.yaml') && !row.filename.endsWith('local-model-switch-client.json')));
   assert.equal(plan.filter(row => row.filename.endsWith('cordis.patch.yml')).length, 1);
-  assert.equal(plan.filter(row => row.filename.includes(`${path.sep}plugins${path.sep}dsh-delete-chat${path.sep}`)).length, 6);
+  assert.equal(plan.filter(row => row.filename.includes(`${path.sep}plugins${path.sep}dsh-delete-chat${path.sep}`)).length, 7);
   const changedProfile = YAML.parse(plan.find(row => row.filename === profiles[0].filename).content, options);
   assert.deepEqual(changedProfile.slice(0, 3), YAML.parse(profileSource, options));
 }));
@@ -223,6 +223,10 @@ test('combined installation and rollback preserve all prior settings together', 
   assert.equal(desktop.flatMap(row => row.insert || []).filter(row => ['dsh-delete-chat', 'dsh-model-switcher'].includes(row.id)).length, 2);
   assert.equal(desktop[1].config.provider, 'my-cloud');
   assert.equal(YAML.parse(fs.readFileSync(path.join(home, '.credentials.yaml'), 'utf8')).refs.CLOUD_KEY, 'fixture-cloud');
+  for (const plugin of ['dsh-delete-chat', 'dsh-model-switcher']) {
+    assert.deepEqual(fs.readFileSync(path.join(home, 'plugins', plugin, 'LICENSE')),
+      fs.readFileSync(path.join(sourceRoot, 'plugins', plugin, 'LICENSE')));
+  }
   assert.equal(JSON.parse(fs.readFileSync(path.join(backupRoot, 'manifest.json'), 'utf8')).metadata.plugins, 'both');
   rollback(backupRoot, { home, closedCheck() {} });
   for (const [filename, bytes] of before) assert.deepEqual(fs.readFileSync(filename), bytes);

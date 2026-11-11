@@ -4,6 +4,10 @@ A model-host pill and archived-chat deletion for DeepSeek Harness, with a combin
 macOS installer. A community extension, not an official DeepSeek product.
 Both packages are experimental and support the audited Harness builds listed below.
 
+Experimental suite release: **`v0.1.0-alpha.1`**.
+Source: [`roock3r/dsh-plugins`](https://github.com/roock3r/dsh-plugins).
+See [GitHub releases](https://github.com/roock3r/dsh-plugins/releases) for downloads.
+
 | Plugin | Controls | Runs on |
 | --- | --- | --- |
 | [dsh-model-switcher](plugins/dsh-model-switcher/README.md) | Active model on a configured Windows gateway | Mac Harness client; inference stays on Windows |
@@ -140,11 +144,13 @@ installation on the target Mac has not yet been completed**. Required installer
 preflight checks exercise its actual runtime before enabling archive deletion.
 Cross-platform unit tests alone do not establish native Mac compatibility.
 
-See [development](docs/development.md) and [future publication](docs/publishing.md).
-No GitHub repository has been created or published by preparing this package.
+See [development](docs/development.md), the [validation record](docs/validation.md),
+and the [publication guide](docs/publishing.md). This alpha does not claim completed
+native Mac validation.
 
 ## License
 
-A project license must be selected before public publication. The plugin code
-does not yet carry an open-source license. Included third-party code retains its
-own license: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+The plugin code is available under the [MIT License](LICENSE), copyright
+2026 Cristian Silva. Included third-party code retains its own license:
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The installer preserves each
+plugin's license notice in its installed runtime folder.
