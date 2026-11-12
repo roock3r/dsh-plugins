@@ -3,7 +3,7 @@ import path from 'node:path';
 export const root = path.resolve(import.meta.dirname, '..');
 const files = ['Install.command', 'Uninstall.command', 'package.json', 'install.mjs',
   'README.md', 'AGENTS.md', 'LICENSE',
-  'THIRD-PARTY-NOTICES.md', 'portable.test.mjs', 'suite-installer.test.mjs', 'standalone.test.mjs', 'native-bundles.test.mjs',
+  'THIRD-PARTY-NOTICES.md', 'portable.test.mjs', 'suite-installer.test.mjs', 'installer-prompts.test.mjs', 'standalone.test.mjs', 'native-bundles.test.mjs',
   '.gitignore', '.gitattributes'];
 const directories = ['docs', 'scripts', '.github', 'plugins/dsh-model-switcher', 'plugins/dsh-delete-chat', 'vendor/yaml'];
 const forbidden = /(?:^|\/)(?:node_modules|\.dsh|backups|artifacts)(?:\/|$)|\.(?:log|sqlite(?:-\w+)?|jsonl|zip|key|pem|gguf|exe|dll)$|(?:^|\/)(?:\.env(?:\..*)?|\.credentials\.yaml|local-model-switch-client\.json|validation\.json)$/i;

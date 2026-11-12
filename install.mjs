@@ -44,7 +44,7 @@ const sourceFile = (id, filename, sourceRoot = import.meta.dirname) => {
   return path.join(sourceRoot, installerDistribution.roots[id], filename);
 };
 const loadSource = (id, filename) => import(pathToFileURL(sourceFile(id, filename)).href);
-const { MODELS, MODEL_IDS, hostProvider, hostCredentialRef } = installerDistribution.roots[pluginId]
+const { MODELS, validateModels, validateCatalog, hostProvider, hostCredentialRef } = installerDistribution.roots[pluginId]
   ? await loadSource(pluginId, 'catalog.mjs') : {};
 const { validateGatewayURL, validateHost, validateClientConfig } = installerDistribution.roots[pluginId]
   ? await loadSource(pluginId, 'settings.mjs') : {};
@@ -273,8 +273,10 @@ export function discoverArchiveRoots(profiles, { appBundle, cliPackageRoot } = {
   return { roots, skipped };
 }
 
-export function configureProfile(source, { host: rawHost, pluginPath, nativeBundle }) {
+export function configureProfile(source, { host: rawHost, pluginPath, nativeBundle, models }) {
   const host = validateHost(rawHost);
+  const configuredModels = validateModels(models ?? host.models ?? MODELS);
+  requireValue(configuredModels.length > 0, 'The gateway has no available models. Configure a supported model on the server before installing.');
   const doc = YAML.parseDocument(source || '[]\n', options);
   requireValue(doc.errors.length === 0, 'Harness profile contains invalid YAML.');
   const before = doc.toJS();
@@ -282,7 +284,9 @@ export function configureProfile(source, { host: rawHost, pluginPath, nativeBund
   const expected = structuredClone(before);
   const provider = { displayName: `${host.label} (${new URL(host.url).host})`, api: 'openai-completions',
     baseURL: `${host.url}/v1`, apiKeyEnv: host.credentialRef,
-    headers: { 'x-local-model-gateway-id': host.gatewayId }, models: structuredClone(MODELS) };
+    compat: { supportsDeveloperRole: false, maxTokensField: 'max_tokens',
+      supportsReasoningEffort: true, thinkingFormat: 'openai' },
+    headers: { 'x-local-model-gateway-id': host.gatewayId }, models: configuredModels };
   const llm = before.flatMap((row, i) => row.id === 'llm-pi-ai' ? [i] : []);
   requireValue(llm.length <= 1, 'Multiple provider patches require manual review.');
   if (llm.length) {
@@ -290,7 +294,7 @@ export function configureProfile(source, { host: rawHost, pluginPath, nativeBund
     const existing = before[i].config?.providers?.[host.provider];
     if (existing) requireValue(existing.apiKeyEnv === host.credentialRef &&
       existing.headers?.['x-local-model-gateway-id'] === host.gatewayId &&
-      existing.models?.length === MODEL_IDS.length && existing.models.every(model => MODEL_IDS.includes(model.id)),
+      Array.isArray(existing.models),
     'This host provider already belongs to another configuration.');
     expected[i].config ??= {};
     expected[i].config.providers ??= {};
@@ -345,30 +349,43 @@ export async function preflight(gatewayURL, key, fetcher = fetch, expectedGatewa
   let response;
   try { response = await fetcher(`${validateGatewayURL(gatewayURL)}/local-switch/models`, {
     headers: { Authorization: `Bearer ${key}`, ...(expectedGatewayId ? { 'x-local-model-gateway-id': expectedGatewayId } : {}) }, signal: AbortSignal.timeout(10000), redirect: 'error',
-  }); } catch { throw new Error('Cannot reach the Windows gateway. Confirm the PC is awake, gateway v2 is running, and its LAN firewall step has been completed.'); }
-  requireValue(response.ok, response.status === 401 || response.status === 403 ? 'The Windows server rejected the key or this network client.' : 'The Windows gateway did not return its model catalog.');
+  }); } catch { throw new Error('Cannot reach the model gateway. Confirm the server is awake, gateway v2 is running, and this computer can reach its address.'); }
+  requireValue(response.ok, response.status === 401 || response.status === 403 ? 'The model server rejected the key or this network client.' : 'The model gateway did not return its model catalog.');
   let data;
-  try { data = await response.json(); } catch { throw new Error('The Windows gateway returned invalid catalog data.'); }
+  try { data = await response.json(); } catch { throw new Error('The model gateway returned invalid catalog data.'); }
   requireValue(data.gateway === 'local-model-switch' && data.version === 2 && Array.isArray(data.models), 'This client needs the Windows model switch gateway version 2.');
   requireValue(typeof data.gatewayId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.gatewayId), 'The server has no stable gateway identity.');
   requireValue(!expectedGatewayId || data.gatewayId === expectedGatewayId, 'The server identity changed. No Mac settings were changed. Review the server address and saved host.');
-  for (const model of MODELS) {
-    const matches = data.models.filter(item => item.id === model.id);
-    requireValue(matches.length === 1 && matches[0].contextWindow === model.contextWindow && matches[0].maxTokens === model.maxTokens,
-      'The Windows catalog does not match the four configured models. No Mac settings were changed.');
-  }
-  return data;
+  const catalog = validateCatalog(data, expectedGatewayId);
+  requireValue(catalog.models.length > 0, 'The gateway has no available models. Check its backend and supported model configuration, then run setup again.');
+  const hostLabel = typeof data.hostLabel === 'string' && data.hostLabel.length <= 100 && !/[\u0000-\u001f\u007f]/.test(data.hostLabel) ? data.hostLabel.trim() : undefined;
+  return { ...catalog, ...(hostLabel ? { hostLabel } : {}) };
 }
 
-function prompt(label, { hidden = false } = {}) {
-  requireValue(process.stdin.isTTY, 'Interactive input is required. Run Install.command from Terminal; never put the key in command arguments.');
+export function prompt(label, { hidden = false, hint, input = process.stdin, output = process.stdout } = {}) {
+  requireValue(input.isTTY, 'Interactive input is required. Run Install.command from Terminal; never put the key in command arguments.');
   return new Promise((resolve, reject) => {
-    let muted = false;
-    const output = new Writable({ write(chunk, encoding, callback) { if (!muted) process.stdout.write(chunk); callback(); } });
-    const rl = readline.createInterface({ input: process.stdin, output, terminal: true });
-    process.stdout.write(label); muted = hidden;
-    rl.question('', answer => { muted = false; rl.close(); if (hidden) process.stdout.write('\n'); resolve(answer.trim()); });
-    rl.once('SIGINT', () => { muted = false; rl.close(); process.stdout.write('\n'); reject(new Error('Installation canceled.')); });
+    let muted = false, settled = false;
+    if (hint) output.write(`${hint}\n`);
+    const terminal = new Writable({ write(chunk, encoding, callback) { if (!muted) output.write(chunk); callback(); } });
+    terminal.columns = output.columns || 80;
+    const rl = readline.createInterface({ input, output: terminal, terminal: true, historySize: 0 });
+    const finish = (error, answer) => {
+      if (settled) return;
+      settled = true;
+      // Keep secret output muted through close; never redraw the entered key.
+      rl.close();
+      if (hidden || error) output.write('\n');
+      if (error) reject(error); else resolve(answer.trim());
+    };
+    rl.once('SIGINT', () => finish(new Error('Installation canceled.')));
+    rl.once('close', () => {
+      if (!settled) finish(new Error('Input closed before an answer was entered. Run Install.command from Terminal again.'));
+    });
+    // Readline must own the label: question('') erases a manually printed label
+    // when it redraws the terminal, leaving only a blinking cursor.
+    rl.question(label, answer => finish(null, answer));
+    muted = hidden;
   });
 }
 
@@ -605,7 +622,9 @@ async function main() {
     requireValue(/^[a-z][a-z0-9-]{0,23}$/.test(hostId), 'Use a short host ID: lowercase letters, digits and hyphens, beginning with a letter.');
     const savedHost = existingConfig.hosts.find(item => item.id === hostId);
     const defaultURL = savedHost?.url;
-    const enteredURL = args['--server'] || args['--gateway'] || await prompt(`Model server URL for ${hostId}${defaultURL ? ` [${defaultURL}]` : ' (for example http://your-pc.local:8083)'}: `);
+    const enteredURL = args['--server'] || args['--gateway'] || await prompt(`Gateway address for ${hostId}${defaultURL ? ` [${defaultURL}]` : ''}: `, {
+      hint: `Enter the model-switch gateway address, for example http://192.168.50.10:8083 (without /v1). ${defaultURL ? 'Press Enter to keep the address in brackets.' : 'Type the address, then press Enter.'}`,
+    });
     requireValue(Boolean(enteredURL || defaultURL), 'Enter the address of your compatible model gateway. No server address is bundled with this installer.');
     const gatewayURL = validateGatewayURL(enteredURL || defaultURL);
     const credentialRef = hostCredentialRef(hostId);
@@ -614,11 +633,15 @@ async function main() {
     requireValue(credentialDocument.errors.length === 0, 'The Harness credential store contains invalid YAML.');
     const credentialData = credentialDocument.toJS();
     requireValue(credentialData?.version === 1, 'Unsupported Harness credential store format; this installer supports version 1.');
-    key = (!args['--ask-key'] && (credentialData.refs?.[credentialRef] || process.env[credentialRef])) || await prompt('Model gateway API key (hidden): ', { hidden: true });
+    key = (!args['--ask-key'] && (credentialData.refs?.[credentialRef] || process.env[credentialRef])) || await prompt('Gateway API key (hidden): ', {
+      hidden: true, hint: 'Paste or type the gateway API key, then press Enter. Characters will not appear while you type.',
+    });
     const catalog = await preflight(gatewayURL, key, fetch, savedHost?.gatewayId);
     const defaultLabel = savedHost?.label || catalog.hostLabel || 'Model host';
-    const label = args['--host-label'] || await prompt(`Host label [${defaultLabel}]: `) || defaultLabel;
-    host = validateHost({ id: hostId, label, url: gatewayURL, provider: hostProvider(hostId), credentialRef, gatewayId: catalog.gatewayId });
+    const label = args['--host-label'] || await prompt(`Host label [${defaultLabel}]: `, {
+      hint: 'Choose a friendly name shown in Harness, for example Windows AI Server. Press Enter to keep the name in brackets.',
+    }) || defaultLabel;
+    host = validateHost({ id: hostId, label, url: gatewayURL, provider: hostProvider(hostId), credentialRef, gatewayId: catalog.gatewayId, models: catalog.models });
   }
   let archiveRoots = {}, skipped = [], archiveProofs = [];
   if (selected.archiveDelete) {
@@ -633,7 +656,7 @@ async function main() {
   const contract = selected.modelSwitch ? assertNativeContract(appBundle) : { verified: true };
   const changes = buildInstallPlan({ home, profiles, selected, host, key, archiveRoots });
   console.log(`Selected ${selected.name}; ${profiles.length} existing profile(s); ${changes.length} file change(s).`);
-  if (host) console.log(`Verified ${host.label} at ${host.url}; four remote models. Installation does not load a model.`);
+  if (host) console.log(`Verified ${host.label} at ${host.url}; ${host.models.length} available model(s). Installation does not load a model.`);
   for (const note of skipped) console.log(note);
   if (archiveProofs.length) console.log('Archived-chat safety tests passed using temporary synthetic chats. Your chats were not changed.');
   if (!contract.verified) console.log(contract.note);

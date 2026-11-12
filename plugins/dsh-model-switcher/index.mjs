@@ -6,9 +6,8 @@ import path from 'node:path';
 export const name = 'dsh-model-switcher';
 export const inject = [];
 export { MODEL_IDS as MODELS } from './catalog.mjs';
-import { MODEL_IDS as MODELS } from './catalog.mjs';
+import { validateCatalog, validateModels, validModelId } from './catalog.mjs';
 import { loadGatewayConfig, readClientConfig, validateGatewayURL } from './settings.mjs';
-const models = new Set(MODELS);
 const ensureDefault = hostId => loadGatewayConfig({ hostId });
 
 export function publicHost(host) {
@@ -16,7 +15,7 @@ export function publicHost(host) {
 }
 
 /** Inspect live public provider settings without reading or returning secret values. */
-export function bindingApplies(ctx, host, model) {
+function providerBinding(ctx, host, model) {
   const entries = ctx.llm.listConfigurableProviders().filter(row => row.provider === host.provider);
   if (entries.length !== 1 || ctx.llm.listProviders().filter(row => row.id === host.provider || row.provider === host.provider).length !== 1) return false;
   const entry = entries[0];
@@ -37,12 +36,50 @@ export function bindingApplies(ctx, host, model) {
   if (Object.keys(provider.headers).some(key => ['authorization', 'x-api-key', 'api-key', 'x-auth-token'].includes(key.toLowerCase()))) return false;
   const pin = Object.entries(provider.headers).filter(([key]) => key.toLowerCase() === 'x-local-model-gateway-id');
   if (pin.length !== 1 || pin[0][1] !== host.gatewayId) return false;
-  const configured = provider.models?.filter(row => models.has(row.id)) || [];
+  const configured = Array.isArray(provider.models) ? provider.models : [];
   if (model && configured.filter(row => row.id === model).length !== 1) return false;
   for (const row of configured) {
     if (['baseURL', 'api', 'apiKeyEnv', 'headers'].some(key => row[key] !== undefined || provider.modelOverrides?.[row.id]?.[key] !== undefined)) return false;
   }
-  return true;
+  return { entry, descriptor: descriptors[0], provider };
+}
+
+export function bindingApplies(ctx, host, model) { return Boolean(providerBinding(ctx, host, model)); }
+
+function comparableModels(rows) {
+  return rows?.map(row => {
+    const result = { ...row };
+    // SettingsForms resolves these schema defaults even when the profile never
+    // stored compat. Do not rewrite the same catalog on every polling interval.
+    if (result.compat && typeof result.compat === 'object' && !Array.isArray(result.compat) &&
+        Object.entries(result.compat).every(([key, value]) => ['chatTemplateKwargs', 'chatTemplateArgs'].includes(key) &&
+          value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0)) delete result.compat;
+    return result;
+  });
+}
+
+/** Apply one revision-checked field edit; never restate redacted credentials. */
+export async function synchronizeProviderModels(ctx, host, rows) {
+  const models = validateModels(rows);
+  // This Harness build refuses an empty custom provider. Keep its last document
+  // so existing chats retain their references; the live pill/gateway stay closed.
+  if (!models.length) return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const binding = providerBinding(ctx, host);
+    if (!binding) throw new Error('The model host provider binding changed.');
+    if (JSON.stringify(comparableModels(binding.provider.models)) === JSON.stringify(models)) return false;
+    if (!Number.isSafeInteger(binding.descriptor.revision) || typeof ctx.settings.mutate !== 'function') {
+      throw new Error('This Harness build cannot safely refresh the model list.');
+    }
+    try {
+      await ctx.settings.mutate(binding.entry.settingsNs,
+        [{ op: 'set', path: [...binding.entry.settingsPath, 'models'], value: models }], binding.descriptor.revision);
+      if (!bindingApplies(ctx, host)) throw new Error('The model host provider binding changed.');
+      return true;
+    } catch (error) {
+      if (attempt || error?.code !== 'SETTINGS_CONFLICT') throw error;
+    }
+  }
 }
 
 /** Only bounded, non-secret model state may be returned through Harness RPC. */
@@ -50,7 +87,7 @@ export function publicStatus(value) {
   if (value?.gateway !== 'local-model-switch' || value.version !== 2) {
     throw new Error('The local model switcher did not return a recognized status.');
   }
-  const modelOrNull = value => models.has(value) ? value : null;
+  const modelOrNull = value => validModelId(value) ? value : null;
   return {
     gateway: value.gateway, version: 2,
     gatewayId: value.gatewayId,
@@ -70,18 +107,19 @@ export function publicStatus(value) {
 }
 
 export function createBridge({ ensureGateway = ensureDefault, getHosts = () => readClientConfig().hosts,
-  applies = () => true, fetcher = fetch } = {}) {
+  applies = () => true, synchronize = async () => {}, fetcher = fetch, now = Date.now, catalogTtl = 30000 } = {}) {
+  const catalogs = new Map(), refreshing = new Map();
   return async (operation, payload = {}, signal) => {
-    if (!['hosts', 'status', 'prepare'].includes(operation)) throw new Error('Unknown model-switch operation.');
+    if (!['hosts', 'catalog', 'status', 'prepare'].includes(operation)) throw new Error('Unknown model-switch operation.');
     if (operation === 'hosts') return { hosts: getHosts().map(publicHost) };
     if (typeof payload.hostId !== 'string') throw new Error('Choose a configured model host.');
-    if (operation === 'prepare' && (!payload || !models.has(payload.model))) {
-      throw new Error('Choose one of the four models on the Windows server.');
+    if (operation === 'prepare' && !validModelId(payload.model)) {
+      throw new Error('Choose an available model on this host.');
     }
     signal?.throwIfAborted();
     const host = await ensureGateway(payload.hostId);
     const { baseURL, key } = host;
-    if (!applies(host, payload.model)) return { applies: false, hostId: host.id };
+    if (!applies(host)) return { applies: false, hostId: host.id };
     // The URL and credential come from the saved host binding, never the RPC caller.
     if (validateGatewayURL(baseURL) !== baseURL || typeof key !== 'string' || !key) {
       throw new Error('The local model switcher is not configured.');
@@ -98,14 +136,49 @@ export function createBridge({ ensureGateway = ensureDefault, getHosts = () => r
       if (!response.ok) throw new Error(response.status === 409 ? 'The host identity or model selection changed. Review the configured host.' : 'The selected model host is unavailable.');
       const value = await response.json();
       if (value.gatewayId !== host.gatewayId) throw new Error('The server identity does not match this saved host. No model was requested.');
-      return publicStatus(value);
+      return value;
     };
+    const fingerprint = `${host.gatewayId}|${host.baseURL}|${host.credentialRef}`;
+    let catalog = catalogs.get(host.id);
+    if (!catalog || catalog.fingerprint !== fingerprint || now() - catalog.checkedAt >= catalogTtl || operation === 'prepare' || payload.refresh === true) {
+      const refreshKey = `${host.id}|${fingerprint}`;
+      let pending = refreshing.get(refreshKey);
+      if (!pending) {
+        pending = (async () => {
+          try {
+            const value = validateCatalog(await request('models'), host.gatewayId);
+            if (!applies(host)) return { applies: false };
+            await synchronize(host, value.models);
+            if (!applies(host)) return { applies: false };
+            return { fingerprint, checkedAt: now(), models: value.models, catalogReady: true,
+              catalogRevision: (catalogs.get(host.id)?.catalogRevision || 0) + 1 };
+          } catch (error) {
+            return { fingerprint, checkedAt: now(), models: [], catalogReady: false, failure: error,
+              catalogRevision: (catalogs.get(host.id)?.catalogRevision || 0) + 1 };
+          }
+        })();
+        refreshing.set(refreshKey, pending);
+        void pending.finally(() => { if (refreshing.get(refreshKey) === pending) refreshing.delete(refreshKey); });
+      }
+      catalog = await pending;
+      if (catalog.applies === false || !applies(host)) return { applies: false, hostId: host.id };
+      catalogs.set(host.id, catalog);
+      if (catalog.failure && (operation === 'prepare' || signal?.aborted)) throw catalog.failure;
+    }
+    const availability = { models: catalog.models, catalogReady: catalog.catalogReady, catalogRevision: catalog.catalogRevision,
+      modelAvailable: catalog.models.some(row => row.id === payload.model),
+      catalogError: catalog.catalogReady ? null : 'Model availability could not be verified. Check the server connection and refresh.' };
+    if (operation === 'catalog') return { ...availability, gatewayId: host.gatewayId, hostId: host.id };
+    if (operation === 'prepare' && !availability.modelAvailable) throw new Error('That model is not currently available on this host.');
     // Pin the server before a mutating request, even if an endpoint ignores our header.
-    let result = await request('status');
-    if (!applies(host, payload.model)) return { applies: false, hostId: host.id };
-    if (operation === 'prepare') result = await request('prepare');
-    if (!applies(host, payload.model)) return { applies: false, hostId: host.id };
-    return { ...result, hostId: host.id };
+    let result = publicStatus(await request('status'));
+    if (!applies(host)) return { applies: false, hostId: host.id };
+    if (operation === 'prepare') {
+      if (!applies(host, payload.model)) return { applies: false, hostId: host.id };
+      result = publicStatus(await request('prepare'));
+    }
+    if (!applies(host)) return { applies: false, hostId: host.id };
+    return { ...result, ...availability, hostId: host.id };
   };
 }
 
@@ -125,7 +198,7 @@ export function createRpcHandler(bridge) {
 
 /** Exact routes are additive; the stock Typert gateway owns the sole RPC interceptor. */
 export function createFetchRoute(operation, bridge) {
-  if (!['hosts', 'status', 'prepare'].includes(operation)) throw new Error('Unknown model-switch operation.');
+  if (!['hosts', 'catalog', 'status', 'prepare'].includes(operation)) throw new Error('Unknown model-switch operation.');
   const endpoint = `windows-model-switch-client/${operation}`;
   const response = (value, status = 200) => new Response(JSON.stringify(value), {
     status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
@@ -165,10 +238,28 @@ export function apply(ctx, config = {}) {
   // let an old background request override a newer explicit dropdown selection.
   ctx.inject(['connection', 'credentials', 'llm', 'settings'], scope => {
     const bridge = createBridge({ ensureGateway: hostId => loadGatewayConfig({ hostId, resolveCredential: ref => scope.credentials.resolve(ref) }),
-      applies: (host, model) => bindingApplies(scope, host, model) });
-    for (const operation of ['hosts', 'status', 'prepare']) {
+      applies: (host, model) => bindingApplies(scope, host, model),
+      synchronize: (host, models) => synchronizeProviderModels(scope, host, models) });
+    for (const operation of ['hosts', 'catalog', 'status', 'prepare']) {
       scope.connection.fetch.register(createFetchRoute(operation, bridge));
     }
+    scope.effect(() => {
+      const stop = new AbortController();
+      let pending = false;
+      const refresh = async () => {
+        if (pending || stop.signal.aborted) return;
+        pending = true;
+        try {
+          const { hosts } = await bridge('hosts');
+          await Promise.allSettled(hosts.map(host => bridge('catalog', { hostId: host.id }, stop.signal)));
+        } catch { /* Catalog status remains unavailable; never switch or replay work. */ }
+        finally { pending = false; }
+      };
+      void refresh();
+      const interval = setInterval(refresh, 30000);
+      interval.unref?.();
+      return () => { stop.abort(); clearInterval(interval); };
+    }, 'local-model-switch: catalog polling');
   });
   ctx.effect(() => {
     const statusFile = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'local-model-switch-client-status.json');

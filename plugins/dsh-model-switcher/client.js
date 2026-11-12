@@ -3,21 +3,17 @@ window.__ModuleLoader__.load({
   id: 'dsh-model-switcher',
   factory(require) {
     const React = require('react');
-    const labels = {
-      'qwen3.8-flash-next-unsloth-ud-q4_k_xl': 'Qwen Flash',
-      'qwen3.8-flash-next-sc117-iq3_s': 'SC117',
-      'qwen3.8-27b-rtx4080': 'Qwen 27B',
-      'qwen3.8-27b-uncensored-rtx4080': 'Qwen 27B Uncensored',
-    };
     const routeOf = (selection, hosts) => {
       const host = hosts.find(item => item.provider === selection?.provider);
-      return host && labels[selection?.model] ? { host, model: selection.model } : null;
+      // Keep removed/unavailable models bound so their conversation stays gated.
+      return host && typeof selection?.model === 'string' && selection.model ? { host, model: selection.model } : null;
     };
     const routeKey = route => route ? `${route.host.id}/${route.model}` : null;
     const transitioning = status => /^(checking|waiting|unloading|releasing|loading)$/.test(status?.phase || '');
-    const readyFor = (status, route) => status?.applies !== false && status?.backendReady === true && status.activeModel === route?.model &&
+    const readyFor = (status, route) => status?.applies !== false && status?.catalogReady === true &&
+      status.models?.some(model => model.id === route?.model) && status?.backendReady === true && status.activeModel === route?.model &&
       status.gatewayId === route?.host.gatewayId && /^(idle|ready|serving)$/.test(status.phase) && !status.error &&
-      !(status.activeRequests > 0 && labels[status.desiredModel] && status.desiredModel !== status.activeModel);
+      !(status.activeRequests > 0 && status.desiredModel && status.desiredModel !== status.activeModel);
     const hostTitle = host => `${host.label} (${new URL(host.url).host})`;
 
     /** Opening a conversation only inspects status; switching requires an explicit choice. */
@@ -27,14 +23,28 @@ window.__ModuleLoader__.load({
       let state = { visible: false, ready: false, busy: false, error: false, text: '', seconds: 0,
         selectionError: null,
         choice: false, activeLabel: '', targetLabel: '', host: '', hosts, currentHost: null,
-        currentModel: null, activeModel: null, loadingModel: null, phase: 'checking', availableModels: {} };
+        currentModel: null, activeModel: null, loadingModel: null, phase: 'checking', availableModels: {}, modelCatalogs: {}, modelAvailable: false };
+      const catalogs = new Map(), catalogEpochs = new Map();
+      const labelFor = (model, host = current?.host) => catalogs.get(host?.id)?.models.find(row => row.id === model)?.name || model || '';
       const listeners = new Set();
       let disposed = false, current = null, generation = 0, preparing = false, startedAt = null;
       let observedAt = null, observedTarget = null, failure = null, selectionError = null;
       let abort, unsubscribe, polling, timerId, ownedBlock, explicitIntent, selectingTarget, lastStatus, action;
+      let catalogRefreshAt = -Infinity, refreshingCatalogs = false;
       const availableModels = () => Object.fromEntries(hosts.map(host => [host.id,
-        Object.keys(labels).filter(model => directory.getSnapshot().groups?.some(group =>
+        (catalogs.get(host.id)?.models || []).map(row => row.id).filter(model => directory.getSnapshot().groups?.some(group =>
           group.id === host.provider && group.models?.some(item => item.id === model)))]));
+      const recordCatalog = (host, value) => {
+        if (value?.gatewayId !== host.gatewayId) throw new Error('Host identity changed.');
+        const revision = Number.isSafeInteger(value.catalogRevision) && value.catalogRevision >= 0 ? value.catalogRevision : 0;
+        if (revision < (catalogs.get(host.id)?.revision || 0)) return;
+        catalogs.set(host.id, { models: value.catalogReady === true && Array.isArray(value.models) ? value.models : [], ready: value.catalogReady === true, revision });
+        if (current?.host.id === host.id && !catalogs.get(host.id).models.some(row => row.id === current.model)) {
+          publish({ visible: true, ready: false, modelAvailable: false, choice: false,
+            text: value.catalogReady === true ? `${hostTitle(host)}: ${labelFor(current.model)} is unavailable. Choose an available model, or restore it on the server.`
+              : `${hostTitle(host)}: model availability could not be verified. Check the server connection and refresh.` });
+        }
+      };
       const setBlock = reason => {
         const existing = blocks.storeFor(sessionId).getSnapshot();
         if (reason) {
@@ -47,33 +57,41 @@ window.__ModuleLoader__.load({
       };
       const publish = next => {
         if (disposed) return;
-        state = { ...state, hosts, availableModels: availableModels(), ...next, selectionError }; setBlock(state.visible && !state.ready ? state.text : null);
+        state = { ...state, hosts, availableModels: availableModels(),
+          modelCatalogs: Object.fromEntries(hosts.map(host => [host.id, catalogs.get(host.id)?.models || []])), ...next, selectionError };
+        setBlock(state.visible && !state.ready ? state.text : null);
         for (const listener of listeners) listener();
       };
       const cancelRequest = () => {
         generation++; abort?.abort(); abort = new AbortController(); preparing = false;
         failure = null; startedAt = null; observedAt = null; observedTarget = null;
       };
-      const receive = (status, gen) => {
+      const receive = (status, gen, catalogEpoch = catalogEpochs.get(current?.host.id) || 0) => {
         if (disposed || gen !== generation || !current || selectingTarget) return;
         lastStatus = status;
         if (status.applies === false) { publish({ visible: false, ready: false, busy: false, choice: false, text: '' }); return; }
         if (status.gatewayId !== current.host.gatewayId) throw new Error('Host identity changed.');
-        const queued = status.activeRequests > 0 && labels[status.desiredModel] && status.desiredModel !== status.activeModel;
+        if (catalogEpoch >= (catalogEpochs.get(current.host.id) || 0)) recordCatalog(current.host, status);
+        const latestCatalog = catalogs.get(current.host.id) || { models: [], ready: false };
+        // A delayed status may carry an older cached catalog than a refresh.
+        status = { ...status, models: latestCatalog.models, catalogReady: latestCatalog.ready };
+        lastStatus = status;
+        const modelAvailable = availableModels()[current.host.id]?.includes(current.model) === true;
+        const queued = status.activeRequests > 0 && status.desiredModel && status.desiredModel !== status.activeModel;
         const moving = transitioning(status) || Boolean(queued);
         const phase = queued ? 'waiting' : status.phase;
         const incoming = status.loadingModel || (moving ? status.desiredModel : preparing ? current.model : null);
         if (moving && (observedAt === null || observedTarget !== incoming)) { observedAt = now(); observedTarget = incoming; }
         if (!moving) { observedAt = null; observedTarget = null; }
-        const ready = !moving && !action && readyFor(status, current);
+        const ready = modelAvailable && !moving && !action && readyFor(status, current);
         if (ready) failure = null;
-        const active = labels[status.activeModel];
+        const active = labelFor(status.activeModel);
         const choice = !ready && !preparing && !action && !moving && status.activeModel !== current.model && readyFor(status, { ...current, model: status.activeModel }) && Boolean(active);
-        const target = labels[current.model];
+        const target = labelFor(current.model);
         let text = ready ? `${target} ready on ${hostTitle(current.host)}` : `${hostTitle(current.host)}: checking ${target}…`;
         if (choice) text = `${hostTitle(current.host)} has ${active} loaded. This conversation uses ${target}.`;
         else if (!ready && moving) {
-          const incomingLabel = labels[incoming];
+          const incomingLabel = labelFor(incoming);
           const action = { checking: 'checking readiness for', waiting: 'waiting to prepare',
             unloading: 'unloading the current model to prepare', releasing: 'releasing memory to prepare', loading: 'loading' }[phase];
           text = incomingLabel ? `${hostTitle(current.host)}: ${action} ${incomingLabel}. This conversation uses ${target}.` :
@@ -81,34 +99,42 @@ window.__ModuleLoader__.load({
         }
         else if (!ready && status.error) text = `${hostTitle(current.host)}: model loading failed. You can retry.`;
         else if (!ready && !preparing) text = `${hostTitle(current.host)}: ${target} is not loaded.`;
+        if (!modelAvailable && !moving) text = status.catalogReady === true
+          ? `${hostTitle(current.host)}: ${target} is unavailable. Choose an available model, or restore it on the server.`
+          : `${hostTitle(current.host)}: model availability could not be verified. Check the server connection and refresh.`;
         if (selectionError || failure) text = selectionError || failure;
         publish({ visible: true, ready, busy: !ready && (preparing || Boolean(action) || moving), error: Boolean(selectionError || failure || (!ready && status.error)),
           choice: Boolean(choice), activeLabel: active || '', targetLabel: target, host: hostTitle(current.host), text,
-          currentHost: current.host, currentModel: current.model, activeModel: status.activeModel,
+          currentHost: current.host, currentModel: current.model, activeModel: status.activeModel, modelAvailable,
           loadingModel: incoming, phase: phase || 'checking',
           seconds: !ready && (preparing || moving) ? Math.max(0, Math.floor((now() - (startedAt ?? observedAt ?? now())) / 1000)) : 0 });
       };
       const poll = async () => {
         if (disposed || !current || polling === generation || selectingTarget || (action && action.stage !== 'preparing')) return;
-        const gen = generation, route = current; polling = gen;
-        try { receive(await call('status', { hostId: route.host.id, model: route.model }, abort?.signal), gen); }
+        const gen = generation, route = current, catalogEpoch = catalogEpochs.get(route.host.id) || 0; polling = gen;
+        try { receive(await call('status', { hostId: route.host.id, model: route.model }, abort?.signal), gen, catalogEpoch); }
         catch {
-          if (gen === generation && !disposed) publish({ visible: true, ready: false, busy: preparing, choice: false,
+          if (gen === generation && !disposed) {
+            if (catalogEpoch >= (catalogEpochs.get(route.host.id) || 0)) catalogs.set(route.host.id,
+              { models: [], ready: false, revision: catalogs.get(route.host.id)?.revision || 0 });
+            publish({ visible: true, ready: false, busy: preparing, choice: false, modelAvailable: false,
             error: !preparing, phase: preparing ? 'checking' : 'error', text: `${hostTitle(route.host)}: status unavailable. Check the server connection.` });
+          }
         } finally { if (polling === gen) polling = null; }
       };
       const prepare = async () => {
-        if (!current || disposed || preparing || selectingTarget || (action && action.stage !== 'preparing')) return;
-        const route = current, gen = ++generation;
+        if (!current || disposed || preparing || selectingTarget || (action && action.stage !== 'preparing') ||
+            !availableModels()[current.host.id]?.includes(current.model)) return;
+        const route = current, gen = ++generation, catalogEpoch = catalogEpochs.get(current.host.id) || 0;
         abort?.abort(); abort = new AbortController(); preparing = true; startedAt = now(); failure = null; selectionError = null;
         publish({ visible: true, ready: false, busy: true, choice: false, error: false, seconds: 0,
-          currentHost: route.host, currentModel: route.model, targetLabel: labels[route.model], host: hostTitle(route.host),
-          phase: 'checking', loadingModel: route.model, text: `${hostTitle(route.host)}: preparing ${labels[route.model]}…` });
+          currentHost: route.host, currentModel: route.model, targetLabel: labelFor(route.model, route.host), host: hostTitle(route.host),
+          phase: 'checking', loadingModel: route.model, text: `${hostTitle(route.host)}: preparing ${labelFor(route.model, route.host)}…` });
         void poll();
-        try { receive(await call('prepare', { hostId: route.host.id, model: route.model }, abort.signal), gen); }
+        try { receive(await call('prepare', { hostId: route.host.id, model: route.model }, abort.signal), gen, catalogEpoch); }
         catch {
           if (gen === generation && !disposed) {
-            failure = `${hostTitle(route.host)}: could not load ${labels[route.model]}. Check the server and retry.`;
+            failure = `${hostTitle(route.host)}: could not load ${labelFor(route.model, route.host)}. Check the server and retry.`;
             publish({ ready: false, busy: false, error: true, phase: 'error', text: failure });
           }
         } finally {
@@ -133,7 +159,7 @@ window.__ModuleLoader__.load({
           if (!pending) { publish({ visible: false, ready: false, busy: false, choice: false }); return; }
           publish({ visible: true, ready: false, busy: true, choice: false, error: false,
             phase: 'selecting', loadingModel: pending.model,
-            text: `${hostTitle(pending.host)}: selecting ${labels[pending.model]}…` });
+            text: `${hostTitle(pending.host)}: selecting ${labelFor(pending.model, pending.host)}…` });
           return;
         }
         const route = routeOf(value.current, hosts), key = routeKey(route);
@@ -158,30 +184,35 @@ window.__ModuleLoader__.load({
         }
         if (changed || wasSelecting || initial) {
           publish({ visible: true, ready: false, busy: Boolean(action), choice: false, error: false, seconds: 0,
-            currentHost: route.host, currentModel: route.model, targetLabel: labels[route.model], host: hostTitle(route.host),
+            currentHost: route.host, currentModel: route.model, targetLabel: labelFor(route.model, route.host), host: hostTitle(route.host),
             activeModel: null, activeLabel: '', phase: action ? 'selecting' : 'checking',
             text: `${hostTitle(route.host)}: checking loaded model…` });
           void poll();
         } else publish({});
       };
       const choose = async (model, hostId, adopt = false) => {
-        if (disposed || !current || preparing || action || selectingTarget || state.busy || !labels[model]) return false;
+        if (disposed || !current || preparing || action || selectingTarget || state.busy || typeof model !== 'string') return false;
         const host = hosts.find(item => item.id === (hostId || current.host.id));
         if (!host || !availableModels()[host.id]?.includes(model)) return false;
         const target = { host, model }, before = routeKey(current);
         const own = { key: routeKey(target), stage: 'preflight' }; action = own; failure = null; selectionError = null;
         publish({ ready: false, busy: true, error: false, choice: false, phase: 'checking', loadingModel: model,
-          text: `${hostTitle(host)}: checking ${labels[model]}…` });
+          text: `${hostTitle(host)}: checking ${labelFor(model, host)}…` });
         try {
           // This status request validates the exact provider/model binding in
           // the host process; registry membership alone is not authorization.
+          const catalogEpoch = catalogEpochs.get(host.id) || 0;
           const fresh = await call('status', { hostId: host.id, model }, abort?.signal);
           if (disposed || action !== own || routeKey(current) !== before) return false;
           if (fresh?.applies === false || fresh?.gatewayId !== host.gatewayId) throw new Error('Host binding changed');
+          if (catalogEpoch >= (catalogEpochs.get(host.id) || 0)) recordCatalog(host, fresh);
+          if (!availableModels()[host.id]?.includes(model)) throw new Error('Model is no longer available');
           if (adopt && !readyFor(fresh, target)) throw new Error('Loaded model changed');
           if (own.key !== before) {
             own.stage = 'selecting';
-            const result = await select({ provider: host.provider, model, reasoningEffort: 'off' });
+            const efforts = catalogs.get(host.id)?.models.find(row => row.id === model)?.reasoningEfforts;
+            const reasoningEffort = efforts && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].find(level => Object.hasOwn(efforts, level));
+            const result = await select({ provider: host.provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
             if (disposed || action !== own) return false;
             if (result?.ok !== true) throw new Error('Selection rejected');
             if (routeKey(current) !== own.key || routeKey(routeOf(directory.getSnapshot().current, hosts)) !== own.key) return false;
@@ -201,12 +232,32 @@ window.__ModuleLoader__.load({
           if (action === own) { action = null; if (lastStatus) receive(lastStatus, generation); void poll(); }
         }
       };
+      const refreshCatalogs = async (force = false) => {
+        if (disposed || !hostsLoaded || refreshingCatalogs || (!force && now() - catalogRefreshAt < 30000)) return;
+        refreshingCatalogs = true; catalogRefreshAt = now();
+        try {
+          await Promise.all(hosts.map(async host => {
+            catalogEpochs.set(host.id, (catalogEpochs.get(host.id) || 0) + 1);
+            try { const value = await call('catalog', { hostId: host.id, ...(force ? { refresh: true } : {}) }); if (!disposed) recordCatalog(host, value); }
+            catch {
+              if (!disposed) {
+                const previous = catalogs.get(host.id);
+                catalogs.set(host.id, { models: [], ready: false, revision: previous?.revision || 0 });
+                if (current?.host.id === host.id) publish({ visible: true, ready: false, modelAvailable: false, choice: false,
+                  text: `${hostTitle(host)}: model availability could not be verified. Check the server connection and refresh.` });
+              }
+            }
+          }));
+          if (!disposed) { publish({}); await poll(); }
+        } finally { refreshingCatalogs = false; }
+      };
       return {
         getSnapshot: () => state,
         subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
         start() {
-          unsubscribe = directory.subscribe(() => sync()); sync(true); timerId = timer(poll, interval);
-          if (!hostsLoaded) void call('hosts', {}).then(value => { if (!disposed) { hosts = value.hosts || []; hostsLoaded = true; sync(true); } })
+          unsubscribe = directory.subscribe(() => sync()); sync(true); timerId = timer(() => { void poll(); void refreshCatalogs(); }, interval);
+          if (hostsLoaded) void refreshCatalogs();
+          if (!hostsLoaded) void call('hosts', {}).then(value => { if (!disposed) { hosts = value.hosts || []; hostsLoaded = true; sync(true); void refreshCatalogs(); } })
             .catch(() => publish({ visible: Boolean(directory.getSnapshot().current?.provider?.startsWith('windows-')),
               ready: false, busy: false, error: true, text: 'Model host configuration is unavailable. Check the installation.' }));
         },
@@ -215,6 +266,7 @@ window.__ModuleLoader__.load({
         useLoaded: () => state.choice ? choose(lastStatus?.activeModel, current?.host.id, true) : Promise.resolve(false),
         dismissSelectionError() { selectionError = null; if (lastStatus) receive(lastStatus, generation); else { publish({ error: false }); void poll(); } },
         poll,
+        refreshCatalogs: () => refreshCatalogs(true),
         dispose() { disposed = true; action = null; generation++; abort?.abort(); unsubscribe?.(); clearTimer(timerId); setBlock(null); listeners.clear(); },
       };
     }
@@ -252,7 +304,9 @@ window.__ModuleLoader__.load({
         const expanded = open || hasActions || manage || Boolean(state.selectionError);
         const pickerHost = state.hosts.find(host => host.id === pickerHostId) || state.currentHost;
         const displayHost = state.host ? state.host.replace(/\s+\([^)]*\)$/, '') : 'Model host';
-        const displayModel = state.busy && labels[state.loadingModel] ? labels[state.loadingModel] : state.targetLabel || state.activeLabel;
+        const displayModel = state.busy && state.loadingModel
+          ? state.modelCatalogs[state.currentHost?.id]?.find(model => model.id === state.loadingModel)?.name || state.loadingModel
+          : state.targetLabel || state.activeLabel;
         return React.createElement('section', { className: 'dsh-model-host-card dsh-model-host-remote', 'data-expanded': expanded ? 'true' : undefined, 'aria-label': 'Model host controls' },
           React.createElement('style', null, `
             .dsh-model-host-card.dsh-model-host-remote{box-sizing:border-box;width:fit-content;max-width:min(calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-dock-inset,8px) - var(--dsh-composer-dock-inset,8px)),calc(var(--dsh-composer-card-max-width,952px) - var(--dsh-composer-dock-inset,8px) - var(--dsh-composer-dock-inset,8px)));margin:0 auto;min-width:0;flex:none;padding:6px 12px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:999px;background:var(--dsw-specific-input-major,#2c2c2e);color:var(--dsw-alias-label-secondary,#bfc0c5);font:11.5px/1.5 var(--dsw-font-family,system-ui);box-shadow:inset 0 1px 0 #ffffff05;position:relative;z-index:1}
@@ -321,8 +375,8 @@ window.__ModuleLoader__.load({
             hasActions || state.selectionError ? React.createElement('div', { className: 'dsh-model-host-actions' },
               state.selectionError ? button('Dismiss', controller.dismissSelectionError) : null,
               state.choice ? button(`Use loaded ${state.activeLabel}`, controller.useLoaded, true) : null,
-              hasActions ? button(`Load conversation ${state.targetLabel || 'model'}`, controller.loadConversation, !state.choice) : null,
-              state.error ? button('Refresh status', controller.poll) : null) : null,
+              hasActions && state.modelAvailable ? button(`Load conversation ${state.targetLabel || 'model'}`, controller.loadConversation, !state.choice) : null,
+              hasActions ? button('Refresh models', controller.refreshCatalogs) : null) : null,
             pickerHost ? React.createElement('div', { className: 'dsh-model-host-details' },
               state.hosts.length > 1 ? React.createElement('label', null, 'Model host ', React.createElement('select', {
                 className: 'dsh-model-host-select', value: pickerHost.id, disabled: state.busy,
@@ -331,7 +385,7 @@ window.__ModuleLoader__.load({
               React.createElement('p', null, pickerHost.url),
               React.createElement('p', null, `Provider: ${pickerHost.provider}`),
               React.createElement('p', null, `Current conversation on ${state.currentHost?.label || 'this host'}: ${state.targetLabel || 'Unknown'} · Loaded: ${state.activeLabel || 'Not ready'}`),
-              React.createElement('div', { className: 'dsh-model-host-picker', 'aria-label': 'Models on selected host' }, Object.entries(labels).map(([model, label]) => {
+              React.createElement('div', { className: 'dsh-model-host-picker', 'aria-label': 'Models on selected host' }, (state.modelCatalogs[pickerHost.id] || []).map(({ id: model, name: label }) => {
                 const available = state.availableModels[pickerHost.id]?.includes(model);
                 const selected = pickerHost.id === state.currentHost?.id && model === state.currentModel;
                 const loaded = pickerHost.id === state.currentHost?.id && model === state.activeModel && state.ready;
@@ -340,6 +394,7 @@ window.__ModuleLoader__.load({
                 () => controller.selectInstalled(model, pickerHost.id), selected,
                 { key: model, disabled: state.busy || !available, 'aria-pressed': selected, title: model });
               })),
+              !(state.modelCatalogs[pickerHost.id]?.length) ? React.createElement('p', null, 'No available models reported by this host. Check the server, then refresh models.') : null,
               React.createElement('div', { className: 'dsh-model-host-actions' }, button('Manage hosts', manageHosts, false, { 'aria-expanded': manage }))) : null,
           manage ? React.createElement('div', { className: 'dsh-model-host-details', 'aria-label': 'Configured model hosts' },
             hostList.length ? React.createElement('ul', { className: 'dsh-model-host-list' }, hostList.map(host =>

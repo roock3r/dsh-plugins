@@ -4,7 +4,7 @@ A model-host pill and archived-chat deletion for DeepSeek Harness, with a combin
 macOS installer. A community extension, not an official DeepSeek product.
 Both packages are experimental and support the audited Harness builds listed below.
 
-Experimental suite release: **`v0.1.0-alpha.2`**.
+Experimental suite release: **`v0.1.0-alpha.3`**.
 Source: [`roock3r/dsh-plugins`](https://github.com/roock3r/dsh-plugins).
 See [GitHub releases](https://github.com/roock3r/dsh-plugins/releases) for downloads.
 
@@ -34,8 +34,11 @@ receives chat-deletion requests.
    bash "/path/to/dsh-plugins/Install.command"
    ```
 
-4. Enter the Windows gateway address, host label, and API key when prompted.
-   No address or key is built in. The key prompt hides your input.
+4. Enter the gateway address, API key, and friendly host label at the labeled
+   prompts, pressing **Enter** after each answer. Use the gateway origin without
+   `/v1`; the installer adds that path to the model provider. No address or key
+   is built in. The key prompt intentionally hides typed or pasted characters.
+   Press Enter at the host-label prompt to keep the name shown in brackets.
 5. The installer checks the gateway identity/catalog and installed Harness build,
    then exercises deletion and recovery with temporary synthetic chats. It writes
    the plugins only after the required checks pass.
@@ -82,7 +85,16 @@ All clients of one gateway share its active weights. Existing responses finish
 before switching. Later requests for inactive weights fail instead of switching
 back silently. Failed agent tasks are not automatically replayed.
 
-The current catalog matches these existing gateway IDs:
+The client reads model names and limits from its authenticated, pinned gateway.
+It refreshes the catalog while connected; adding a supported model recipe on the
+server no longer requires rebuilding the Mac plugin. The server must advertise
+only models with a configured load/chat route and available backend files.
+Downloading weights alone does not create that route. Discovery never loads a
+model, downloads weights, or silently changes the conversation's model.
+
+Host labels and model names are separate. The installer uses the server's model
+names, without adding a hardcoded Windows prefix. These are the original host's
+configured models; they are examples, not a client allowlist:
 
 | Model ID | Context | Reply cap |
 | --- | ---: | ---: |

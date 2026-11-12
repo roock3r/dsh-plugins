@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hostProvider, hostCredentialRef } from './catalog.mjs';
+import { hostProvider, hostCredentialRef, validateModels } from './catalog.mjs';
 
 export function validateGatewayURL(value) {
   const url = new URL(value);
@@ -27,7 +27,8 @@ export function validateHost(host) {
     throw new Error('A saved model host binding is invalid. Run the installer to review it.');
   }
   return { id: host.id, label: host.label.trim(), provider: host.provider, credentialRef: host.credentialRef,
-    gatewayId: host.gatewayId, url: validateGatewayURL(host.url) };
+    gatewayId: host.gatewayId, url: validateGatewayURL(host.url),
+    ...(host.models === undefined ? {} : { models: validateModels(host.models) }) };
 }
 
 export function validateClientConfig(config) {

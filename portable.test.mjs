@@ -7,9 +7,9 @@ import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
 import YAML from './vendor/yaml/dist/index.js';
 import { configureProfile, configureCredentials, preflight, applyTransaction, rollback } from './install.mjs';
-import { createBridge, createFetchRoute, publicStatus, bindingApplies, name as modelPluginName } from './plugins/dsh-model-switcher/index.mjs';
+import { createBridge, createFetchRoute, publicStatus, bindingApplies, synchronizeProviderModels, name as modelPluginName } from './plugins/dsh-model-switcher/index.mjs';
 import { validateGatewayURL, loadGatewayConfig, validateClientConfig } from './plugins/dsh-model-switcher/settings.mjs';
-import { MODELS, MODEL_IDS, hostCredentialRef, hostProvider } from './plugins/dsh-model-switcher/catalog.mjs';
+import { MODELS, MODEL_IDS, hostCredentialRef, hostProvider, validateModels, validateCatalog } from './plugins/dsh-model-switcher/catalog.mjs';
 
 const yamlOptions = { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }] };
 const host = { id: 'pc', label: 'Windows model host', url: 'http://192.168.50.10:8083', provider: hostProvider('pc'),
@@ -20,7 +20,8 @@ const pluginPath = path.join(os.tmpdir(), 'Mac user with spaces', '.dsh/plugins/
 const source = `# retain this comment\n- id: llm-pi-ai\n  config:\n    providers:\n      local-mlx:\n        baseURL: http://127.0.0.1:8080/v1\n        models: [{id: my-local-model}]\n      cloud:\n        apiKeyEnv: CLOUD_KEY\n- id: agent-default-model\n  config: {provider: local-mlx, model: my-local-model}\n- id: another-plugin\n  config:\n    callback: !!js () => 42\n`;
 const catalog = { gateway: 'local-model-switch', version: 2, gatewayId: host.gatewayId, hostLabel: host.label, models: MODELS };
 const stateFor = (model, which = host, extra = {}) => ({ gateway: 'local-model-switch', version: 2,
-  gatewayId: which.gatewayId, phase: 'ready', loadedModel: model, activeModel: model, backendReady: true, ready: true, ...extra });
+  gatewayId: which.gatewayId, phase: 'ready', loadedModel: model, activeModel: model, backendReady: true, ready: true,
+  catalogReady: true, models: MODELS, ...extra });
 const ok = value => ({ ok: true, json: async () => value });
 
 test('profile edits preserve Mac providers, defaults, JS tags and comments; provider is pinned', () => {
@@ -82,7 +83,7 @@ test('catalog preflight authenticates, pins an existing host, and never loads mo
   assert.equal(calls[0].options.headers.Authorization, 'Bearer fixture-key');
   assert.equal(calls[0].options.headers['x-local-model-gateway-id'], host.gatewayId);
   assert.equal(calls[0].options.redirect, 'error');
-  await assert.rejects(preflight(host.url, 'fixture-key', async () => ok({ ...catalog, models: MODELS.slice(0, 2) })), /does not match/);
+  assert.equal((await preflight(host.url, 'fixture-key', async () => ok({ ...catalog, models: MODELS.slice(0, 2) }))).models.length, 2);
   await assert.rejects(preflight(host.url, 'fixture-key', async () => ok(catalog), second.gatewayId), /identity changed/);
   await assert.rejects(preflight(host.url, 'fixture-key', async () => ({ ok: false, status: 401 })), /rejected/);
 });
@@ -97,7 +98,7 @@ test('four models route through the chosen host, with pins and no secrets in ret
     const state = await bridge('prepare', { hostId: second.id, model }); assert.equal(state.loadedModel, model);
     assert.equal(JSON.stringify(state).includes('fixture-key'), false); assert.equal(state.gatewayId, second.gatewayId);
   }
-  assert.equal(calls.length, 8); assert.equal(calls.every(url => url.startsWith(second.url)), true);
+  assert.equal(calls.length, 12); assert.equal(calls.every(url => url.startsWith(second.url)), true);
   assert.equal(JSON.stringify(await bridge('hosts')).includes('credentialRef'), false);
   await assert.rejects(bridge('prepare', { hostId: host.id, model: 'unknown' }));
   assert.throws(() => publicStatus({ ...catalog, version: 1 }));
@@ -163,7 +164,7 @@ vm.runInNewContext(fs.readFileSync(new URL('./plugins/dsh-model-switcher/client.
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function controllerFixture(selection = { provider: host.provider, model: MODEL_IDS[0] }, loaded = MODEL_IDS[1], which = host, options = {}) {
-  const groups = [host, second].map(item => ({ id: item.provider, models: MODELS }));
+  const groups = options.groups || [host, second].map(item => ({ id: item.provider, models: options.models || MODELS }));
   let snapshot = { status: 'ready', current: selection, groups }, block, listener, active = loaded, statusExtra = {};
   const calls = [], selected = [];
   const directory = { getSnapshot: () => snapshot, subscribe(fn) { listener = fn; return () => {}; } };
@@ -179,6 +180,7 @@ function controllerFixture(selection = { provider: host.provider, model: MODEL_I
     },
     call: async (op, payload) => {
       calls.push({ op, payload });
+      if (op === 'catalog') return options.catalog ? options.catalog(payload) : { ...stateFor(null, [host, second].find(item => item.id === payload.hostId)), models: options.models || MODELS };
       const custom = options.call && await options.call(op, payload);
       if (custom !== undefined) return custom;
       if (op === 'prepare') active = payload.model;
@@ -405,7 +407,8 @@ test('pill opens locally as a real button and keeps actual loading progress in i
   renderedState = { visible: true, ready: true, busy: false, error: false, choice: false, text: 'Ready', seconds: 0,
     host: `${host.label} (${new URL(host.url).host})`, hosts: [host, second], currentHost: host,
     currentModel: MODEL_IDS[0], activeModel: MODEL_IDS[0], activeLabel: 'Qwen Flash', targetLabel: 'Qwen Flash',
-    phase: 'ready', availableModels: { [host.id]: MODEL_IDS, [second.id]: MODEL_IDS } };
+    phase: 'ready', modelAvailable: true, modelCatalogs: { [host.id]: MODELS, [second.id]: MODELS },
+    availableModels: { [host.id]: MODEL_IDS, [second.id]: MODEL_IDS } };
   const render = () => { hookIndex = 0; return component({ sessionId: 'ui-test', modelDirectory: directory }); };
   const nodes = tree => typeof tree === 'object' ? [tree, ...tree.children.flatMap(nodes)] : [];
   const words = tree => typeof tree === 'object' ? tree.children.map(words).join(' ') : String(tree);
@@ -429,9 +432,9 @@ test('pill opens locally as a real button and keeps actual loading progress in i
   assert.equal(nodes(tree).find(node => node.props.className === 'dsh-model-host-badge').props['data-tone'], 'error');
 });
 
-test('unrelated providers trigger no host requests and wrong UUID never appears ready', async () => {
+test('unrelated providers allow only background catalog reads and wrong UUID never appears ready', async () => {
   const f = controllerFixture({ provider: 'local-mlx', model: MODEL_IDS[0] }); f.controller.start(); await flush();
-  assert.equal(f.calls.length, 0); assert.equal(f.block(), undefined); f.controller.dispose();
+  assert.equal(f.calls.every(row => row.op === 'catalog'), true); assert.equal(f.block(), undefined); f.controller.dispose();
   const wrong = controllerFixture({ provider: host.provider, model: MODEL_IDS[0] }, MODEL_IDS[0], second); wrong.controller.start(); await flush();
   assert.equal(wrong.controller.getSnapshot().ready, false); assert.equal(wrong.controller.getSnapshot().error, true);
   assert.equal(wrong.calls.some(row => row.op === 'prepare'), false); wrong.controller.dispose();
@@ -447,15 +450,15 @@ test('remote loading reports the actual incoming model and keeps this conversati
   const f = controllerFixture({ provider: host.provider, model: MODEL_IDS[0] }, MODEL_IDS[0]); f.controller.start(); await flush();
   f.setStatus({ phase: 'loading', loadingModel: MODEL_IDS[1], desiredModel: MODEL_IDS[2] }); await f.controller.poll();
   let state = f.controller.getSnapshot();
-  assert.match(state.text, /loading SC117\. This conversation uses Qwen Flash\./);
+  assert.match(state.text, /loading SC117 Flash IQ3_S\. This conversation uses Qwen Flash Q4\./);
   assert.equal(state.ready, false); assert.equal(state.busy, true); assert.equal(state.choice, false); assert.ok(f.block());
   f.setStatus({ phase: 'waiting', desiredModel: MODEL_IDS[2] }); await f.controller.poll();
-  assert.match(f.controller.getSnapshot().text, /waiting to prepare Qwen 27B\. This conversation uses Qwen Flash\./);
+  assert.match(f.controller.getSnapshot().text, /waiting to prepare Qwen 27B Q4\. This conversation uses Qwen Flash Q4\./);
   f.setStatus({ phase: 'loading' }); await f.controller.poll();
   assert.match(f.controller.getSnapshot().text, /model switch is in progress/);
   assert.doesNotMatch(f.controller.getSnapshot().text, /loading Qwen Flash/);
   f.setActive(MODEL_IDS[1]); f.setStatus({}); await f.controller.poll(); state = f.controller.getSnapshot();
-  assert.equal(state.choice, true); assert.equal(state.activeLabel, 'SC117'); assert.equal(state.targetLabel, 'Qwen Flash');
+  assert.equal(state.choice, true); assert.equal(state.activeLabel, MODELS[1].name); assert.equal(state.targetLabel, MODELS[0].name);
   assert.equal(f.calls.some(row => row.op === 'prepare'), false); f.controller.dispose();
 });
 
@@ -505,6 +508,242 @@ test('runtime contains no Windows process launch or model download commands', ()
   for (const filename of ['index.mjs', 'settings.mjs', 'catalog.mjs', 'client.js']) {
     const text = fs.readFileSync(new URL(`./plugins/dsh-model-switcher/${filename}`, import.meta.url), 'utf8');
     assert.doesNotMatch(text, /C:\\Users|V:\\LocalAI|powershell|nvidia-smi|child_process|huggingface|strata\.exe/);
+  }
+});
+
+test('dynamic catalogs validate capabilities and reject duplicates, unsafe metadata and endpoint injection', () => {
+  const novel = { ...MODELS[0], id: 'team/model:Q4_K_M', name: 'Office reasoning model', provider: 'untrusted-route' };
+  assert.deepEqual(validateModels([novel])[0], { ...MODELS[0], id: novel.id, name: novel.name });
+  assert.deepEqual(validateModels([{ ...novel, reasoningEfforts: undefined }])[0].reasoningEfforts, false);
+  assert.deepEqual(validateCatalog({ ...catalog, models: [] }, host.gatewayId).models, []);
+  for (const patch of [{ id: 'constructor' }, { id: '../bad model' }, { name: 'Bad\nname' }, { name: 'x'.repeat(201) },
+    { contextWindow: Infinity }, { maxTokens: 9999999 }, { input: ['image'] }, { input: ['text', 'text'] },
+    { reasoningEfforts: { off: 'none' } }, { reasoningEfforts: { medium: 'injected' } },
+    { headers: { Authorization: 'secret' } }, { baseURL: 'https://example.com' }, { apiKeyEnv: 'OTHER' }]) {
+    assert.throws(() => validateModels([{ ...novel, ...patch }]));
+  }
+  assert.throws(() => validateModels([novel, novel]));
+  assert.throws(() => validateModels(Array.from({ length: 257 }, (_, i) => ({ ...novel, id: `m-${i}` }))));
+  assert.throws(() => validateCatalog({ ...catalog, gatewayId: second.gatewayId }, host.gatewayId), /identity/);
+});
+
+test('catalog polling adds, renames and removes arbitrary models without ever preparing one', async () => {
+  let clock = 0, rows = [{ ...MODELS[0], id: 'new-model:4b', name: 'New small model' }];
+  const calls = [], synchronized = [];
+  const bridge = createBridge({ now: () => clock, ensureGateway: async () => ({ ...host, baseURL: host.url, key: 'fixture-key' }),
+    synchronize: async (_host, value) => synchronized.push(value), fetcher: async (url, options) => {
+      calls.push({ url, method: options.method });
+      return ok(url.endsWith('/models') ? { ...catalog, models: rows } : stateFor('new-model:4b'));
+    } });
+  const first = await bridge('status', { hostId: host.id, model: rows[0].id });
+  assert.equal(first.modelAvailable, true); assert.equal(first.models[0].name, 'New small model');
+  rows = [{ ...rows[0], name: 'Renamed small model' }, { ...MODELS[1], id: 'another/new-model', name: 'Another model' }];
+  await bridge('status', { hostId: host.id, model: rows[0].id });
+  assert.equal(calls.filter(row => row.url.endsWith('/models')).length, 1);
+  clock = 30001;
+  const secondRead = await bridge('catalog', { hostId: host.id });
+  assert.deepEqual(secondRead.models.map(row => row.name), ['Renamed small model', 'Another model']);
+  rows = [];
+  await assert.rejects(bridge('prepare', { hostId: host.id, model: 'new-model:4b' }), /not currently available/);
+  assert.equal(calls.some(row => row.method === 'POST'), false);
+  assert.deepEqual(synchronized.at(-1), []);
+  assert.equal((await bridge('status', { hostId: host.id, model: 'new-model:4b' })).modelAvailable, false);
+});
+
+test('catalog failures clear available choices, never use an installer seed, and recover on refresh', async () => {
+  let fail = true;
+  const bridge = createBridge({ ensureGateway: async () => ({ ...host, models: MODELS, baseURL: host.url, key: 'fixture-key' }),
+    fetcher: async url => {
+      if (url.endsWith('/models')) { if (fail) throw new Error('offline'); return ok(catalog); }
+      return ok(stateFor(MODEL_IDS[0]));
+    } });
+  let result = await bridge('status', { hostId: host.id, model: MODEL_IDS[0] });
+  assert.equal(result.catalogReady, false); assert.deepEqual(result.models, []); assert.equal(result.modelAvailable, false);
+  fail = false;
+  result = await bridge('catalog', { hostId: host.id, refresh: true });
+  assert.equal(result.catalogReady, true); assert.equal(result.models.length, 4);
+});
+
+test('concurrent catalog readers share one identity-checked refresh and one provider mutation', async () => {
+  let release, requests = 0, writes = 0;
+  const pending = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ ensureGateway: async () => ({ ...host, baseURL: host.url, key: 'fixture-key' }),
+    synchronize: async () => { writes++; }, fetcher: async () => { requests++; await pending; return ok(catalog); } });
+  const first = bridge('catalog', { hostId: host.id }), secondRead = bridge('catalog', { hostId: host.id, refresh: true });
+  await flush(); assert.equal(requests, 1); release(); await Promise.all([first, secondRead]);
+  assert.equal(writes, 1);
+});
+
+test('matching model IDs on separate hosts keep independent names and cache entries', async () => {
+  const bridge = createBridge({ ensureGateway: async id => { const value = id === host.id ? host : second; return { ...value, baseURL: value.url, key: 'fixture-key' }; },
+    fetcher: async url => { const which = url.startsWith(host.url) ? host : second;
+      return ok({ ...catalog, gatewayId: which.gatewayId, models: [{ ...MODELS[0], name: `${which.label} model` }] }); } });
+  assert.equal((await bridge('catalog', { hostId: host.id })).models[0].name, `${host.label} model`);
+  assert.equal((await bridge('catalog', { hostId: second.id })).models[0].name, `${second.label} model`);
+  assert.equal((await bridge('catalog', { hostId: host.id })).models[0].name, `${host.label} model`);
+});
+
+test('live synchronization edits only the pinned provider model field with a revision guard', async () => {
+  const provider = structuredClone(validProvider()), ctx = settingsContext(provider), calls = [];
+  ctx.settings.describe = () => [{ ns: 'pi-ai', revision: 7, value: { providers: { [host.provider]: provider, cloud: { apiKeyEnv: 'SECRET_REF' } } } }];
+  ctx.settings.mutate = async (ns, ops, revision) => {
+    calls.push({ ns, ops, revision }); provider.models = ops[0].value;
+  };
+  const next = [{ ...MODELS[0], id: 'dynamic-model', name: 'Dynamic model' }];
+  assert.equal(await synchronizeProviderModels(ctx, host, next), true);
+  assert.deepEqual(calls, [{ ns: 'pi-ai', ops: [{ op: 'set', path: ['providers', host.provider, 'models'], value: next }], revision: 7 }]);
+  assert.equal(await synchronizeProviderModels(ctx, host, next), false);
+  assert.equal(await synchronizeProviderModels(ctx, host, []), false);
+  assert.equal(calls.length, 1); assert.equal(provider.apiKeyEnv, host.credentialRef);
+  provider.baseURL = second.url + '/v1';
+  await assert.rejects(synchronizeProviderModels(ctx, host, MODELS), /binding changed/);
+  assert.equal(calls.length, 1);
+});
+
+test('revision conflict cannot overwrite a host redirected while model synchronization was pending', async () => {
+  const provider = structuredClone(validProvider()), ctx = settingsContext(provider);
+  ctx.settings.describe = () => [{ ns: 'pi-ai', revision: 7, value: { providers: { [host.provider]: provider } } }];
+  let calls = 0;
+  ctx.settings.mutate = async () => { calls++; provider.baseURL = second.url + '/v1'; throw Object.assign(new Error('changed'), { code: 'SETTINGS_CONFLICT' }); };
+  await assert.rejects(synchronizeProviderModels(ctx, host, [MODELS[0]]), /binding changed/);
+  assert.equal(calls, 1);
+});
+
+test('schema-added empty compatibility defaults do not cause repeated catalog writes', async () => {
+  const provider = structuredClone(validProvider());
+  provider.models = provider.models.map(model => ({ ...model, compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} } }));
+  const ctx = settingsContext(provider);
+  ctx.settings.mutate = async () => { assert.fail('unchanged normalized catalog must not write'); };
+  assert.equal(await synchronizeProviderModels(ctx, host, MODELS), false);
+});
+
+test('installed SettingsForms, Loader and PiAiAdapter refresh models without repeated writes or changing another provider', {
+  skip: !process.env.DSH_DELETE_TEST_PACKAGE_ROOT,
+}, async () => {
+  const packageRoot = process.env.DSH_DELETE_TEST_PACKAGE_ROOT;
+  const load = name => import(pathToFileURL(path.join(packageRoot, name, 'lib/index.js')).href);
+  const [{ Context }, { default: Loader }, { default: Settings }, llm] = await Promise.all([
+    load('cordis'), load('cordis-plugin-loader'), load('dsh-settings'), load('dsh-llm'),
+  ]);
+  const temporaryParent = fs.realpathSync(os.tmpdir());
+  const temporary = fs.mkdtempSync(path.join(temporaryParent, 'dsh-native-catalog-'));
+  const ctx = new Context(), fibers = [];
+  let entry, edits = 0;
+  try {
+    ctx.provide('profileContext', { home: temporary, dir: temporary,
+      patchPath: path.join(temporary, 'profile.yml'), name: 'synthetic' });
+    ctx.provide('credentials', { resolve: async ref => ref === host.credentialRef ? { value: 'synthetic-fixture-only' } : undefined,
+      get: async () => undefined });
+    const loader = ctx.plugin(Loader, { baseUrl: pathToFileURL(temporary + path.sep).href });
+    fibers.push(loader); await loader.await();
+    // Persistence alone is an in-memory shim. The actual SettingsForms performs
+    // validation/revision checks and the actual Loader reconciles live config.
+    ctx.provide('configEditor', {
+      documentPath: path.join(temporary, 'profile.yml'), entries: () => entry ? [entry] : [],
+      configuration: () => entry ? [{ entry, inherited: {}, override: structuredClone(entry.options.config) }] : [],
+      async edit(target, change) {
+        assert.equal(target, entry); edits++;
+        await ctx.loader.update(entry.id, { config: change(structuredClone(entry.options.config), {}) });
+      },
+    });
+    for (const plugin of [llm.default || llm, Settings]) {
+      const fiber = ctx.plugin(plugin); fibers.push(fiber); await fiber.await();
+    }
+    const id = await ctx.loader.create({ name: pathToFileURL(path.join(packageRoot, 'dsh-llm-pi-ai/lib/index.js')).href,
+      config: { providers: { [host.provider]: validProvider(),
+        independent: { api: 'openai-completions', baseURL: 'http://127.0.0.1:18084/v1', apiKeyEnv: host.credentialRef,
+          models: [{ ...MODELS[0], id: 'independent-model' }] } } } });
+    entry = ctx.loader.resolve(id); await ctx.loader.await();
+    const independent = await ctx.llm.listModels('independent');
+    assert.deepEqual(independent.map(model => model.id), ['independent-model']);
+    const next = [{ ...MODELS[0], id: 'synthetic-new-model', name: 'Synthetic new model', reasoningEfforts: false }];
+    assert.equal(await synchronizeProviderModels(ctx, host, next), true);
+    assert.deepEqual((await ctx.llm.listModels(host.provider)).map(model => model.id), ['synthetic-new-model']);
+    assert.deepEqual(await ctx.llm.listModels('independent'), independent);
+    assert.equal(entry.options.config.providers[host.provider].apiKeyEnv, host.credentialRef);
+    assert.deepEqual(entry.options.config.providers[host.provider].headers, validProvider().headers);
+    assert.equal(await synchronizeProviderModels(ctx, host, next), false);
+    assert.equal(await synchronizeProviderModels(ctx, host, next), false);
+    assert.equal(edits, 1);
+  } finally {
+    for (const fiber of fibers.reverse()) await fiber.dispose();
+    const resolved = fs.realpathSync(temporary);
+    assert.equal(path.dirname(resolved), temporaryParent); assert.match(path.basename(resolved), /^dsh-native-catalog-/);
+    fs.rmSync(resolved, { recursive: true });
+  }
+});
+
+test('removed conversation model stays visible and blocked instead of becoming an unmanaged chat', async () => {
+  const f = controllerFixture({ provider: host.provider, model: MODEL_IDS[0] }, MODEL_IDS[0]);
+  f.controller.start(); await flush(); assert.equal(f.controller.getSnapshot().ready, true);
+  f.setStatus({ models: [], catalogReady: true }); await f.controller.poll();
+  const value = f.controller.getSnapshot();
+  assert.equal(value.visible, true); assert.equal(value.ready, false); assert.equal(value.modelAvailable, false);
+  assert.equal(value.currentModel, MODEL_IDS[0]); assert.match(value.text, /unavailable/); assert.ok(f.block());
+  assert.equal(value.availableModels[host.id].length, 0);
+  await f.controller.loadConversation(); assert.equal(f.calls.some(row => row.op === 'prepare'), false);
+  f.controller.dispose();
+});
+
+test('new model names arrive from a fresh catalog and can be selected without a client release', async () => {
+  const next = { ...MODELS[0], id: 'future/model:q4', name: 'Future reasoning model' };
+  const models = [...MODELS, next];
+  const f = controllerFixture(undefined, MODEL_IDS[0], host, { models,
+    call: (op, payload) => op === 'status' ? stateFor(MODEL_IDS[0], host, { models }) : op === 'prepare' ? stateFor(payload.model, host, { models }) : undefined });
+  f.controller.start(); await flush();
+  assert.equal(f.controller.getSnapshot().availableModels[host.id].includes(next.id), true);
+  assert.equal(await f.controller.selectInstalled(next.id), true);
+  assert.equal(f.selected[0].model, next.id);
+  assert.equal(f.calls.filter(row => row.op === 'prepare').length, 1);
+  assert.equal(f.controller.getSnapshot().targetLabel, next.name);
+  f.controller.dispose();
+});
+
+test('initial seed never opens the composer before fresh host availability arrives', async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const f = controllerFixture(undefined, MODEL_IDS[0], host, { catalog: async () => { await pending; return { ...stateFor(null), models: MODELS }; },
+    call: async () => { await pending; return stateFor(MODEL_IDS[0]); } });
+  f.controller.start();
+  assert.equal(f.controller.getSnapshot().ready, false); assert.ok(f.block());
+  assert.equal(f.controller.getSnapshot().availableModels[host.id].length, 0);
+  release(); await flush(); assert.equal(f.controller.getSnapshot().ready, true);
+  assert.equal(f.calls.some(row => row.op === 'prepare'), false); f.controller.dispose();
+});
+
+test('dynamic selection omits effort for nonreasoning models and chooses a supported level when off is absent', async () => {
+  for (const [reasoningEfforts, expected] of [[false, undefined], [{ medium: 'medium', high: 'high' }, 'medium']]) {
+    const next = { ...MODELS[0], id: 'dynamic-reasoning-model', name: 'Dynamic model', reasoningEfforts };
+    const models = [...MODELS, next];
+    const f = controllerFixture(undefined, MODEL_IDS[0], host, { models,
+      call: (op, payload) => op === 'status' ? stateFor(MODEL_IDS[0], host, { models }) : op === 'prepare' ? stateFor(payload.model, host, { models }) : undefined });
+    f.controller.start(); await flush(); await f.controller.selectInstalled(next.id);
+    assert.equal(f.selected[0].reasoningEffort, expected);
+    if (expected === undefined) assert.equal(Object.hasOwn(f.selected[0], 'reasoningEffort'), false);
+    f.controller.dispose();
+  }
+});
+
+test('catalog removal and outage immediately gate chat and delayed older status cannot revive choices', async () => {
+  for (const outage of [false, true]) {
+    let delayed = false, unavailable = false, release;
+    const f = controllerFixture(undefined, MODEL_IDS[0], host, {
+      catalog: async payload => {
+        if (unavailable && outage) throw new Error('RPC unavailable');
+        return { ...stateFor(null, payload.hostId === host.id ? host : second),
+          models: unavailable ? [] : MODELS, catalogRevision: unavailable ? 2 : 1 };
+      },
+      call: (op) => op === 'status' && delayed ? new Promise(resolve => { release = resolve; }) : stateFor(MODEL_IDS[0], host, { catalogRevision: 1 }),
+    });
+    f.controller.start(); await flush(); assert.equal(f.controller.getSnapshot().ready, true);
+    delayed = true; const status = f.controller.poll(); await flush();
+    unavailable = true; await f.controller.refreshCatalogs();
+    assert.equal(f.controller.getSnapshot().ready, false); assert.ok(f.block());
+    assert.equal(f.controller.getSnapshot().availableModels[host.id].length, 0);
+    release(stateFor(MODEL_IDS[0], host, { catalogRevision: 1 })); await status;
+    assert.equal(f.controller.getSnapshot().ready, false); assert.ok(f.block());
+    assert.equal(f.controller.getSnapshot().availableModels[host.id].length, 0);
+    assert.equal(f.calls.some(row => row.op === 'prepare'), false); f.controller.dispose();
   }
 });
 

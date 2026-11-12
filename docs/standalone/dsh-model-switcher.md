@@ -30,7 +30,11 @@ The equivalent shorthand is `github:roock3r/dsh-model-switcher`.
    bash "/path/to/dsh-model-switcher/Install.command"
    ```
 
-4. Enter your gateway address, a host label, and the API key at the hidden prompt.
+4. Enter your gateway address, the API key, and a friendly host label at the
+   labeled prompts. Press **Enter** after each answer. Use the gateway origin
+   (for example `http://192.168.50.10:8083`), without `/v1`. API-key characters
+   intentionally do not appear while typing or pasting. For a label such as
+   `Office AI Server`, type a new name or press Enter to keep the shown default.
    Setup verifies its identity and model catalog before writing the connection.
    It configures the profiles where you registered this GitHub bundle.
 5. Reopen Harness. Select a model under the named provider, then click the pill
@@ -45,8 +49,11 @@ are included or downloaded.
 
 An existing compatible **model-switch gateway v2** is required. A bare Ollama,
 MLX, Strata, or generic OpenAI-compatible endpoint does not implement its control
-protocol. The four supported model IDs are defined in `catalog.mjs`; new models
-need corresponding server and client changes. See the
+protocol. The plugin reads model names and capabilities from the gateway and
+refreshes the list while connected. New supported models need a server load/chat
+recipe and available backend files; they no longer need a Mac plugin rebuild.
+Discovered files or Ollama tags without a supported recipe are not selectable.
+See the
 [gateway protocol](docs/gateway-protocol.md).
 
 All clients of a gateway share its loaded weights. Existing responses finish

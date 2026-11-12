@@ -33,7 +33,7 @@ export function standaloneFiles(plugin) {
     if (name.startsWith(prefix)) copy(name, name.slice(prefix.length));
     if (name.startsWith('vendor/yaml/')) copy(name);
   }
-  for (const name of ['install.mjs', 'Install.command', 'Uninstall.command', 'LICENSE',
+  for (const name of ['install.mjs', 'installer-prompts.test.mjs', 'Install.command', 'Uninstall.command', 'LICENSE',
     'THIRD-PARTY-NOTICES.md', '.gitignore', '.gitattributes', 'docs/validation.md']) copy(name);
   if (plugin === 'dsh-model-switcher') copy('docs/gateway-protocol.md');
   entries.set('docs/plugin-details.md', Buffer.from(source.get(`${prefix}README.md`).toString('utf8')
@@ -46,7 +46,7 @@ export function standaloneFiles(plugin) {
   metadata.homepage = `https://github.com/roock3r/${plugin}#readme`;
   metadata.bugs = { url: `https://github.com/roock3r/${plugin}/issues` };
   metadata.scripts = { ...metadata.scripts, test: plugin === 'dsh-delete-chat'
-    ? 'node --test distribution.test.mjs test/*.test.mjs' : 'node --test distribution.test.mjs',
+    ? 'node --test distribution.test.mjs installer-prompts.test.mjs test/*.test.mjs' : 'node --test distribution.test.mjs installer-prompts.test.mjs',
     setup: 'bash Install.command --apply', 'setup:check': 'bash Install.command --check' };
   entries.set('package.json', json(metadata));
   entries.set('installer-distribution.json', json({ version: 1, plugins: { [plugin]: '.' } }));

@@ -21,8 +21,11 @@ not download weights or install an inference server.
 
 This plugin expects the custom `local-model-switch` gateway version 2. Generic
 Ollama, MLX, Strata, and OpenAI-compatible endpoints do not expose its control
-API. The current catalog includes the four Qwen IDs in `catalog.mjs`; changing
-the model catalog requires corresponding server/client validation changes.
+API. Model names, context/reply limits, and reasoning capabilities come from the
+gateway's available-model catalog. The client polls that catalog while connected
+and updates the managed provider when it changes. Additional supported server
+recipes do not require rebuilding the Mac plugin. Host labels remain separate
+from model names.
 See [gateway protocol](../../docs/gateway-protocol.md).
 
 All clients of a gateway share its loaded model. Opening the pill or a saved
@@ -34,6 +37,18 @@ If another chat uses different weights, choose **Use loaded model** or
 **Load conversation model**. An existing response can finish before unloading;
 later inactive-model requests fail rather than automatically switching back.
 This plugin does not automatically replay failed tasks.
+
+The server must filter out disabled, missing, or unavailable recipes. Finding a
+model in Ollama or a weights folder does not prove it can be served through this
+gateway. Such candidates stay unselectable until the host has a supported load
+and chat configuration. Availability checks do not run inference or download
+anything. A load can still fail later; the composer stays blocked in that case.
+
+If discovery fails or returns no available models, the pill offers none and
+blocks sending to that host. Harness cannot represent an empty custom-provider
+catalog, so its native picker may retain the last saved entries until a nonempty
+catalog returns. Those stale entries do not bypass the switcher's readiness
+checks. Existing conversation selections are preserved, never silently replaced.
 
 ## Compatibility and privacy
 

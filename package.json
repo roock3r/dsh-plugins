@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugins",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "DeepSeek Harness companion plugins and a combined Mac installer",
   "private": true,
   "license": "MIT",
@@ -9,7 +9,7 @@
   "type": "module",
   "workspaces": ["plugins/dsh-model-switcher", "plugins/dsh-delete-chat"],
   "scripts": {
-    "test": "node --test portable.test.mjs suite-installer.test.mjs standalone.test.mjs native-bundles.test.mjs plugins/dsh-delete-chat/test/*.test.mjs",
+    "test": "node --test portable.test.mjs suite-installer.test.mjs installer-prompts.test.mjs standalone.test.mjs native-bundles.test.mjs plugins/dsh-delete-chat/test/*.test.mjs",
     "check:public": "node scripts/check-public.mjs",
     "package": "node scripts/package.mjs",
     "package:standalone": "node scripts/standalone.mjs"

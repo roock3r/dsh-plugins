@@ -6,6 +6,7 @@ import os from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import YAML from './vendor/yaml/dist/index.js';
+import { MODELS } from './plugins/dsh-model-switcher/catalog.mjs';
 import {
   pluginSelection, parseArguments, configureProfile, configureArchiveProfile, hasArchivePlugin,
   discoverCliPackageRoot, discoverArchiveRoots, verifyArchivePackages,
@@ -19,6 +20,29 @@ const options = { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => 
 const profileSource = '# existing user comment\n- id: llm-pi-ai\n  config:\n    providers:\n      my-cloud: {apiKeyEnv: CLOUD_KEY, baseURL: https://example.test/v1}\n- id: agent-default-model\n  config: {provider: my-cloud, model: existing-model}\n- id: callback\n  config: {value: !!js custom.expression}\n';
 const fixtureHost = { id: 'lab', label: 'Test model host', url: 'http://192.168.50.10:8083',
   provider: 'windows-lab', credentialRef: 'DSH_SWITCH_LAB_KEY', gatewayId: '11111111-1111-4111-8111-111111111111' };
+
+test('installer uses the verified host catalog and updates it without changing unrelated providers', () => {
+  const models = [{ id: 'lab/compact-chat:q4', name: 'Compact chat Q4', contextWindow: 16384,
+    maxTokens: 2048, input: ['text'], reasoningEfforts: false }];
+  const host = { ...fixtureHost, label: 'Lab inference', models };
+  const pluginPath = path.join(os.tmpdir(), 'fixture-plugin');
+  const first = configureProfile(profileSource, { host, pluginPath });
+  const installed = YAML.parse(first.output, options);
+  assert.deepEqual(installed[0].config.providers[host.provider].models, models);
+  assert.equal(installed[0].config.providers[host.provider].reasoning, undefined);
+  assert.deepEqual(installed[0].config.providers[host.provider].compat, {
+    supportsDeveloperRole: false, maxTokensField: 'max_tokens', supportsReasoningEffort: true, thinkingFormat: 'openai',
+  });
+  assert.match(installed[0].config.providers[host.provider].displayName, /^Lab inference/);
+  const nextModels = [...models, MODELS[0]];
+  const next = configureProfile(first.output, { host: { ...host, models: nextModels }, pluginPath });
+  const updated = YAML.parse(next.output, options);
+  assert.deepEqual(updated[0].config.providers[host.provider].models, nextModels);
+  assert.deepEqual(updated[0].config.providers['my-cloud'], installed[0].config.providers['my-cloud']);
+  assert.deepEqual(updated[1], installed[1]);
+  assert.throws(() => configureProfile(first.output, { host: { ...host, models: [] }, pluginPath }), /no available models/);
+  assert.throws(() => configureProfile(first.output, { host: { ...host, models: [{ ...models[0], maxTokens: 0 }] }, pluginPath }));
+});
 
 function fixture(run) {
   const tempRoot = fs.realpathSync(os.tmpdir());

@@ -15,6 +15,7 @@
   Installed-runtime tests use the explicit environment paths in the development
   guide. Verify the ZIP includes executable LF command files and both plugins.
 - Update plugin READMEs and recovery documentation when behavior changes. Treat
-  the external gateway v2 dependency and fixed model catalog as explicit limits.
+  the external gateway v2 dependency, server availability checks, and registered
+  load/chat recipes as explicit limits. Discovery must never load weights.
 - Keep vendored third-party files and their notices intact. Choose a project
   license and publication destination before publicly releasing this source.
